@@ -1,0 +1,11 @@
+*.png
+*.jpg
+*.jpeg
+*.PNG
+*.JPG
+*.JPEG
+*.lmdb
+*.LMDB
+*.pt
+*.pth
+*__pycache__
