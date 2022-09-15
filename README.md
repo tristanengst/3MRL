@@ -10,7 +10,7 @@ conda install -c conda-forge tqdm matplotlib gdown wandb -y
 pip install lmdb
 pip install git+https://github.com/tristanengst/apex-utils
 pip install git+https://github.com/rwightman/pytorch-image-models
-pip install 'git+https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup'
+pip install git+https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup
 ```
 Download the datasets we use:
 ```
