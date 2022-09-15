@@ -1,4 +1,4 @@
-# 3MVR: Masked Multi-Modal Variational Representations
+# 3MVR: Masked Multi-Modal Representation Densities
 
 ### Setup
 Install the following packages via the following commands.
