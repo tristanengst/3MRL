@@ -9,12 +9,32 @@ from torch.optim import AdamW
 import torch.nn
 from torch.utils.data import DataLoader, Subset, Dataset
 
+from ApexUtils import *
 from Data import *
 from Models import *
 from Utils import *
 
+def model_folder(args):
+    """Returns the folder to which to save a model built with [args]."""
+    uid = args.uid if args.job_id is None else args.job_id
+    data = data_without_split_or_path(args.data_tr)
+    folder = f"{project_dir}/models/{data}-bs{args.bs}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-{uid}{suffix_str(args)}"
+
+    conditional_safe_make_directory(folder)
+    if not os.path.exists(f"{folder}/config.json"):
+        with open(f"{folder}/config.json", "w+") as f:
+            json.dump(vars(args), f)
+    return folder
+
 class ImageLatentDataset(Dataset):
-    """
+    """Dataset for loading images and latents to a MaskedViTVAE model. The
+    provided collate function must be used in any DataLoaders wrappeding this
+    dataset.
+
+    Args:
+    images      -- NxCxHxW tensor of images
+    mask_noises -- NxD tensor of mask noises
+    latents     -- Nx... tensor of latents for the model
     """
     def __init__(self, images, mask_noises, latents):
         super(ImageLatentDataset, self).__init__()
@@ -34,30 +54,21 @@ class ImageLatentDataset(Dataset):
         latents = torch.stack([b[2] for b in batch])
         return images, {"mask_noise": mask_noises, "latents": latents}
 
-
-
 def get_image_latent_dataset(model, dataset, latent_spec, args):
-    """
-
-    Note: it's usually convenient to overfit a function for IMLE sampling to the
-    model in question, and here is no different.
+    """Returns an ImageLatent dataset constructed using the data in [dataset].
+    This dataset can be used for one epoch's worth of training.
 
     Args:
-    model               -- model to get codes for
-    dataset             -- dataset containing the data to sample
-    latent_spec  -- dictionary of latent code shapes
-    args                -- Namespace with --sp, --ns, and --code_bs arguments
+    model       -- model to get codes for
+    dataset     -- dataset containing the data to sample
+    latent_spec -- dictionary of latent code shapes
+    args        -- Namespace with --sp, --ns, and --code_bs arguments
     """
     with torch.no_grad():
         least_losses = torch.ones(len(dataset), device=device) * float("inf")
         initial_codes = sample_latent_dict(latent_spec, len(dataset),
             device="cpu",
             noise="ones")
-
-        # The latent codes for [mask_noise] are kept constant in sampling and
-        # the subsequent training, so we create [latents_only_spec] which we can
-        # sample and combine with [mask_noise] (after repeat_interleaveing) to
-        # get latent codes
         best_latents = initial_codes["latents"]
         mask_noise = initial_codes["mask_noise"]
         latents_only_spec = {"latents": latent_spec["latents"]}
@@ -77,11 +88,9 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
 
             all_images.append(x)
             bs = len(x)
-            batch_start = idx * args.code_bs
-            batch_stop = min(len(dataset), (idx + 1) * args.code_bs)
-            x_sampling = torch.repeat_interleave(x, args.sp, axis=0)
-
-            mask_noise_ = mask_noise[batch_start:batch_stop]
+            start = idx * args.code_bs
+            stop = min(len(dataset), (idx + 1) * args.code_bs)
+            mask_noise_ = mask_noise[start:stop]
             mask_noise_ = mask_noise_.repeat_interleave(args.sp, dim=0)
 
             for idx in tqdm(range(args.ns // args.sp),
@@ -94,7 +103,6 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
                 losses, _, _ = model(x_sampling, z,
                     mask_ratio=args.mask_ratio,
                     reduction="batch")
-
                 _, idxs = torch.min(losses.view(bs, args.sp), dim=1)
 
                 new_codes = z["latents"]
@@ -102,12 +110,12 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
                 new_codes = new_codes[torch.arange(bs), idxs]
                 losses = losses.view(bs, args.sp)[torch.arange(bs), idxs]
 
-                change_idxs = losses < least_losses[batch_start:batch_stop]
-                best_latents[batch_start:batch_stop][change_idxs] = new_codes[change_idxs]
-                least_losses[batch_start:batch_stop][change_idxs] = losses[change_idxs]
+                change_idxs = losses < least_losses[start:stop]
+                best_latents[start:stop][change_idxs] = new_codes[change_idxs]
+                least_losses[start:stop][change_idxs] = losses[change_idxs]
 
-    all_images = torch.cat(all_images, axis=0)
-    return ImageLatentDataset(all_images.cpu(), mask_noise.cpu(), best_latents.cpu())
+    all_images = torch.cat(all_images, axis=0).cpu()
+    return ImageLatentDataset(all_images, mask_noise.cpu(), best_latents.cpu())
 
 def validate(model, data_fn, data_te, args):
     pass
@@ -137,6 +145,11 @@ def parse_v_spec(args):
 
 def get_args(args=None):
     P = argparse.ArgumentParser()
+    P.add_argument("--wandb", choices=["disabled", "online", "offline"],
+        default="online",
+        help="Type of W&B logging")
+
+
     P.add_argument("--arch", choices=["base_pretrained"], default="base_pretrained",
         help="Type of ViT model to use")
     P.add_argument("--resume", default=None,
@@ -150,7 +163,7 @@ def get_args(args=None):
     P.add_argument("--data_path", default=data_dir,
         help="Path to where datasets are stored")
 
-    P.add_argument("--finetune_mae", choices=[0, 1], type=int, default=1,
+    P.add_argument("--finetune", choices=[0, 1], type=int, default=1,
         help="Whether to finetune an existing MAE model or train from scratch")
     P.add_argument("--v_spec", nargs="+",
         help="Specification for making the autoencoder variational")
@@ -182,7 +195,12 @@ def get_args(args=None):
     P.add_argument("--gpus", nargs="+", default=[0, 1], type=int,
         help="Device IDs of GPUs to use")
 
+    P.add_argument("--job_id", type=int, default=None,
+        help="SLURM job_id if available")
+
     args = P.parse_args() if args is None else P.parse_args(args)
+
+    args.uid = wandb.util.generate_id() if args.job_id is None else args.job_id
     return args
 
 if __name__ == "__main__":
@@ -192,22 +210,20 @@ if __name__ == "__main__":
     # Load resumed things or instantiate them
     ############################################################################
     if args.resume is None:
+        wandb.init(anonymous="allow", id=args.uid, config=args,
+            mode=args.wandb, project="3MRD",
+            name=os.path.basename(model_folder(args)))
+
         if args.arch == "base_pretrained":
             mae_model_state = torch.load(f"{project_dir}/mae_checkpoints/mae_pretrain_vit_base_full.pth")["model"]
-            mae_model = mae_vit_base_patch16()
-            mae_model.load_state_dict(mae_model_state)
-
-            # Dictionary
-            idx2v_method = parse_v_spec(args)
-
-            if args.finetune_mae:
-                model = MaskedViTVAE(idx2v_method, mae_model=mae_model)
-            else:
-                model = MaskedViTVAE(idx2v_method, **mae_model.kwargs)
-            model = nn.DataParallel(model, device_ids=args.gpus).to(device)
+            mae = mae_vit_base_patch16()
+            mae.load_state_dict(mae_model_state)
         else:
             raise NotImplementedError()
 
+        model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
+        model = MaskedViTVAE(parse_v_spec(args), **model_kwargs)
+        model = nn.DataParallel(model, device_ids=args.gpus).to(device)
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-6)
         last_epoch = -1
     else:
@@ -244,6 +260,8 @@ if __name__ == "__main__":
     # Begin training
     ############################################################################
 
+    log_iter = int(args.epochs * args.ipe / 10000)
+    cur_step = (last_epoch + 1) * args.ipe
     for epoch in tqdm(range(args.epochs),
         desc="TRAINING: Epochs",
         dynamic_ncols=True,
@@ -268,16 +286,31 @@ if __name__ == "__main__":
 
             with torch.cuda.amp.autocast():
                 loss, _, _ = model(x, z, mask_ratio=args.mask_ratio)
+                loss = torch.mean(loss)
 
-                tqdm.write(f"LOSS SHAPE {loss.shape}")
-
-            loss.mean().backward()
+            loss.backward()
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
 
-            batch_loss += loss.detach()
             cur_step += 1
+
+            if cur_step % log_iter == 0:
+                wandb.log({"loss/pretrain": loss.item(),
+                    "lr": scheduler.get_lr()},
+                    step=cur_step)
 
         ########################################################################
         # Validate and save a checkpoint
         ########################################################################
+        if epoch % args.eval_iter == 0:
+            model = model.cpu()
+            val_model = VariationaViT(parse_v_spec(args), v_mae_model=model)
+            val_model = nn.DataParallel(val_model, device_idxs=args.gpus).to(device)
+
+            val_results = linear_probe_one_aug(val_model,
+                data_fn=data_fn,
+                data_te=data_te,
+                latent_spec={"latents": latent_spec["latents"]},
+                args=args)
+
+            wandb.log(val_results)

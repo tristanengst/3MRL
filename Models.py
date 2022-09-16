@@ -16,29 +16,6 @@ from original_code.util import pos_embed as PE
 
 from Utils import *
 
-class ToyModel(nn.Module):
-
-    def __init__(self):
-        super(ToyModel, self).__init__()
-        self.x = nn.Linear(4, 4)
-
-    def get_latent_shape(self, test_input=torch.ones(4, 3, 224, 224, device=device),
-        mask_ratio=.75):
-        """Returns the latent shape minus the batch dimension for the network.
-        Concretely, this is a list of tuples. Th
-
-        Args:
-        test_input  -- a BSxCxHxW tensor to be used as the test input
-        mask_ratio  -- mask ratio
-        """
-        return {"mask_noise": {"shape": (3, 224, 224), "batch_dim": 0},
-                "latents": {"shape": (3, 224, 224), "batch_dim": 0}}
-
-    def forward(self, x, z, mask_ratio=.75, reduction="batch"):
-        result = x - (x + z['latents'])
-        return x.view(len(x), -1).mean(dim=1), None, None
-
-
 class MaskedAutoencoderViT(nn.Module):
     """Masked Autoencoder with VisionTransformer backbone."""
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=1024,
@@ -252,8 +229,6 @@ class MaskedAutoencoderViT(nn.Module):
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
         loss = loss * mask
 
-        tqdm.write(f"LOSS SHAPE A {loss.shape}")
-
         if reduction == "mean":
             return (loss.sum() / mask.sum()).unsqueeze(0)  # The 0-1ness of [mask] makes this not dependent on batch size
         elif reduction == "batch":
@@ -313,9 +288,10 @@ class VariationalBlock(nn.Module):
         z = z() if isinstance(z, nn.Module) else z
 
         if self.v_method == "add":
+            fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
             return fx + z
         elif isinstance(self.v_method, nn.Module):
-            return self.v_method(x, z)
+            return self.v_method(fx, z)
         else:
             raise NotImplementedError()
 
@@ -332,8 +308,11 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
     kwargs          -- arguments for constructing the ViT architecture
     """
 
-    def __init__(self, idx2v_modules, **kwargs):
-        super(VisionTransformer, self).__init__(**kwargs)
+    def __init__(self, idx2v_modules, v_mae_model=None, **kwargs):
+        if v_mae_model is None:
+            super(VisionTransformer, self).__init__(**kwargs)
+        else:
+            super(VisionTransformer, self).__init__(**v_mae_model.kwargs)
 
         # Replace the normal ModuleList [blocks] with a dictionary mapping from
         # block indices to the blocks, with some of the blocks made variational
@@ -358,6 +337,9 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
             self.fc_norm = norm_layer(embed_dim)
             del self.norm
 
+        if if mae_model is None:
+            self.load_state_dict(v_mae_model.state_dict())
+
     def get_latent_shape(self, test_input=torch.ones(4, 3, 224, 224, device=device), mask_ratio=1):
         """Returns the latent shape minus the batch dimension for the network.
 
@@ -365,7 +347,33 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
         test_input  -- a BSxCxHxW tensor to be used as the test input
         mask_ratio  -- mask ratio. Ignored.
         """
-        raise NotImplementedError()
+        shapes = []
+        with torch.no_grad():
+            # Forward method, but can adds computed shapes to [shapes]
+            x = self.patch_embed(test_input)
+            x = x + self.pos_embed[:, 1:, :]
+
+            # Shape of noise needed for the mask
+            mask_noise_shape = (x.shape[1],)
+
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
+            cls_token = self.cls_token + self.pos_embed[:, :1, :]
+            cls_tokens = cls_token.expand(x.shape[0], -1, -1)
+            x = torch.cat((cls_tokens, x), dim=1)
+
+            for idx,block in self.idx2block.items():
+                if int(idx) in self.block_idx2z_idx:
+                    s = block.get_latent_shape(test_input=x)
+                    shapes.append(s)
+                    x = block(x, torch.ones(len(x), *s, device=device))
+                else:
+                    x = block(x)
+
+        if len(set(shapes)) == 1:
+            return {"mask_noise": {"shape": mask_noise_shape, "batch_dim": 0},
+                "latents": {"shape": (len(shapes),) + shapes[0], "batch_dim": 0}}
+        else:
+            raise ValueError(f"Got multiple shapes for latent codes: {shapes}")
 
     def forward_features(self, x, z):
         """Returns representations for [x].
@@ -486,7 +494,6 @@ class MaskedViTVAE(MaskedAutoencoderViT):
         test_input  -- a BSxCxHxW tensor to be used as the test input
         mask_ratio  -- mask ratio
         """
-
         shapes = []
         with torch.no_grad():
             # Forward method, but can adds computed shapes to [shapes]
