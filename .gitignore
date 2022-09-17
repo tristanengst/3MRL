@@ -9,3 +9,5 @@
 *.pt
 *.pth
 *__pycache__
+*models
+*wandb

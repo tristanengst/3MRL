@@ -1,10 +1,10 @@
+import argparse
 from ApexUtils import *
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 project_dir = f"{os.path.dirname(__file__)}"
 data_dir = f"{project_dir}/data"
-
 
 def sample_latent_dict(d, bs, device=device, noise="gaussian"):
     """Returns dictionary [d] after mapping all its values that are tuples of
@@ -20,3 +20,7 @@ def sample_latent_dict(d, bs, device=device, noise="gaussian"):
         return {k: sample_latent_dict(v, bs, noise=noise) for k,v in d.items()}
     else:
         raise NotImplementedError()
+
+def namespace_with_update(args, key, value):
+    """Returns a Namespace identical to [args] but with [key] set to [value]."""
+    return argparse.Namespace(**(vars(args) | {new_param: value}))

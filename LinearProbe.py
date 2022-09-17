@@ -18,19 +18,31 @@ from SimpleSaving import load_resnet_from_simple_save
 os.environ['MKL_THREADING_LAYER'] = 'GNU'
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 
-def accuracy(model, loader):
-    """Returns the accuracy of [model] on data in [loader]."""
-    correct, total = 0, 0
+def eval_model_on_loader(model, loader):
+    """Returns an (accuracy, average loss) tuple of [model] run on data from
+    [loader].
+    """
+    correct, total, total_loss = 0, 0, 0
     model.eval()
+    loss_fn = nn.CrossEntropyLoss(reduction="sum").to(device)
     with torch.no_grad():
         for x,y in loader:
-            preds = torch.argmax(model(x.to(device)), dim=1)
-            correct += torch.sum((preds == y.to(device))).item()
-            total += len(preds)
+            y = y.to(device, non_blocking=True)
+            x = x.to(device, non_blocking=True)
+            fx = model(x)
+            total_loss += loss_fn(fx, y)
+            correct += torch.sum((torch.argmax(fx, dim=1) == y)).item()
+            total += x.shape[0]
 
-    return correct / total
+    return correct / total, total_loss / total
 
 def get_fewshot_dataset(dataset, args):
+    """Returns a Subset of [dataset] giving a k-shot n-way task.
+
+    Args:
+    dataset -- ImageFolder-like dataset
+    args    -- Namespace containing relevant parameters
+    """
     raise NotImplementedError()
 
 class OneAugDensityDataset(Dataset):
@@ -88,30 +100,30 @@ def linear_probe_one_aug(model, data_fn, data_te, latent_spec, args):
     loss_fn = nn.CrossEntropyLoss().to(device)
     accs_te = []
     losses_fn = []
-    for trial in tqdm(range(args.val_trials),
+    for trial in tqdm(range(args.trials),
         desc="Validation trials",
         dynamic_ncols=True):
 
         data_fn = OneAugDensityDataset(model, data_fn, latent_spec, args)
         data_te = OneAugDensityDataset(model, data_te, latent_spec, args)
         loader_fn = DataLoader(data_fn,
-            batch_size=args.eval_bs,
+            batch_size=args.val_bs,
             num_workers=24,
             pin_memory=True,
             shuffle=True)
         loader_te = DataLoader(data_te,
-            batch_size=args.eval_bs,
+            batch_size=args.val_bs,
             num_workers=24,
             pin_memory=True,
             shuffle=True)
 
         probe = nn.Linear(data_fn[0][0].shape[-1], num_classes)
         probe = nn.DataParallel(probe, device_ids=args.gpus).to(device)
-        optimizer = AdamW(probe, lr=args.eval_lr, weight_decay=1e-6)
+        optimizer = AdamW(probe, lr=args.val_lr, weight_decay=1e-6)
         scheduler = CosineAnnealingWarmupRestarts(optimizer,
             first_cycle_steps=args.epochs,
-            max_lr=args.eval_lr,
-            min_lr=args.eval_lr / 100)
+            max_lr=args.val_lr,
+            min_lr=args.val_lr / 100)
 
         for epoch in tqdm(range(args.val_epochs),
             desc="Validation epochs",
@@ -130,13 +142,17 @@ def linear_probe_one_aug(model, data_fn, data_te, latent_spec, args):
 
             scheduler.step()
 
+        acc_te, loss_te = eval_model_on_loader(probe, loader_te)
         losses_fn.append(loss.item())
-        accs_te.append(accuracy(probe, loader_te))
+        losses_te.append(loss_te)
+        accs_te.append(acc_te)
 
     return {"accuracy/test": np.mean(accs_te),
-        "a": np.std(accs_te) * 1.96 / np.sqrt(args.trials),
-        "finetune_losses": np.mean(losses_fn),
-        "finetune_losses_conf": np.std(losses_fn) * 1.96 / np.sqrt(args.trials)}
+        "accuracy_conf": np.std(accs_te) * 1.96 / np.sqrt(args.trials),
+        "loss_eval/finetune": np.mean(losses_fn),
+        "loss_eval/test": np.mean(losses_te),
+        "loss_eval/finetune_conf": np.std(losses_fn) * 1.96 / np.sqrt(args.trials),
+        "loss_eval/test_conf": np.std(losses_te) * 1.96 / np.sqrt(args.trials)}
 
 def parse_args():
     P = argparse.ArgumentParser()

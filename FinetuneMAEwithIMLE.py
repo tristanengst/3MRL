@@ -1,6 +1,7 @@
 import argparse
 from itertools import chain
 from tqdm import tqdm
+import wandb
 
 from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
@@ -18,7 +19,7 @@ def model_folder(args):
     """Returns the folder to which to save a model built with [args]."""
     uid = args.uid if args.job_id is None else args.job_id
     data = data_without_split_or_path(args.data_tr)
-    folder = f"{project_dir}/models/{data}-bs{args.bs}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-{uid}{suffix_str(args)}"
+    folder = f"{project_dir}/models/{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-{uid}{suffix_str(args)}"
 
     conditional_safe_make_directory(folder)
     if not os.path.exists(f"{folder}/config.json"):
@@ -76,7 +77,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
         loader = DataLoader(dataset,
             batch_size=args.code_bs,
             pin_memory=True,
-            num_workers=12,
+            num_workers=args.num_workers,
             drop_last=False)
 
         all_images = []
@@ -91,7 +92,6 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
             start = idx * args.code_bs
             stop = min(len(dataset), (idx + 1) * args.code_bs)
             mask_noise_ = mask_noise[start:stop]
-            mask_noise_ = mask_noise_.repeat_interleave(args.sp, dim=0)
 
             for idx in tqdm(range(args.ns // args.sp),
                 desc=f"SAMPLING code_bs {args.code_bs} | sp {args.sp}: Iterations over code batch size",
@@ -100,9 +100,10 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
 
                 latents = sample_latent_dict(latents_only_spec, bs * args.sp)
                 z = {"mask_noise": mask_noise_} | latents
-                losses, _, _ = model(x_sampling, z,
-                    mask_ratio=args.mask_ratio,
-                    reduction="batch")
+                with torch.cuda.amp.autocast():
+                    losses, _, _ = model(x, z,
+                        mask_ratio=args.mask_ratio,
+                        reduction="batch")
                 _, idxs = torch.min(losses.view(bs, args.sp), dim=1)
 
                 new_codes = z["latents"]
@@ -117,15 +118,95 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
     all_images = torch.cat(all_images, axis=0).cpu()
     return ImageLatentDataset(all_images, mask_noise.cpu(), best_latents.cpu())
 
-def validate(model, data_fn, data_te, args):
-    pass
+def validate_pretrain(model, data_tr, data_te, latent_spec, args):
+    """Returns validation information about [model] vis à vis pretraining.
+
+    Args:
+    model       -- MaskedVAEViT model
+    data_tr     -- ImageFolder-like dataset with transforms of training data
+    data_te     -- ImageFolder-like dataset with transforms of testing data
+    latent_spec -- dictionary giving the latent specification for model
+    args        -- Namespace with relevant parameters
+    """
+    idxs_tr = torch.linspace(0, len(data_tr) - 1, args.num_ex_for_eval_tr)
+    idxs_tr = [int(idx) for idx in idxs_tr.tolist()]
+    loader_tr = DataLoader(Subset(data_tr, indices=idxs_tr),
+        batch_size=args.code_bs,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        shuffle=False)
+
+    idxs_te = torch.linspace(0, len(data_tr) - 1, args.num_ex_for_eval_te)
+    idxs_te = [int(idx) for idx in idxs_te.tolist()]
+    loader_te = DataLoader(Subset(data_te, indices=idxs_te),
+        batch_size=args.code_bs,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        shuffle=False)
+
+    with torch.no_grad():
+
+        input_tr, gen_tr, mask_tr = [], [], []
+        for x,_ in tqdm(loader_tr,
+            desc="Validation: test data",
+            leave=False,
+            dynamic_ncols=True):
+
+            z = sample_latent_dict(latent_spec, len(x) * args.eval_code_per_ex)
+            z["mask_noise"] = z["mask_noise"][:len(x)]
+            with torch.cuda.amp.autocast():
+                loss, pred, mask = model(x, z,
+                    mask_ratio=args.mask_ratio,
+                    reduction="batch")
+            input_tr.append(x.cpu())
+            gen_tr.append(pred.cpu())
+            mask_tr.append(mask.cpu())
+
+            tqdm.write(f"VAL SHAPES {mask.shape} | {pred.shape} | {x.shape}")
+
+        input_te, gen_te, mask_te, loss_te = [], [], [], 0
+        for x,_ in tqdm(loader_te,
+            desc="Validation: test data",
+            leave=False,
+            dynamic_ncols=True):
+
+            z = sample_latent_dict(latent_spec, len(x) * args.eval_code_per_ex)
+            z["mask_noise"] = z["mask_noise"][:len(x)]
+            with torch.cuda.amp.autocast():
+                loss, pred, mask = model(x, z,
+                    mask_ratio=args.mask_ratio,
+                    reduction="batch")
+            loss_te += loss.sum().item()
+            input_te.append(x.cpu())
+            gen_te.append(pred.cpu())
+            mask_te.append(mask.cpu())
+            tqdm.write(f"---------------------------{pred.shape}")
+            show_image_grid(de_normalize(pred.view(len(x), args.eval_code_per_ex, 3, 224, 224)))
+
+            tqdm.write(f"VAL SHAPES {mask.shape} | {pred.shape} | {x.shape}")
+
+    input_tr = torch.cat(input_te, dim=0)
+    mask_tr = torch.cat(mask_te, dim=0)
+    gen_tr = torch.cat(gen_te, dim=0).view(len(idxs_tr), args.eval_code_per_ex, 3, args.input_size, args.input_size)
+    images_tr = [[inp] + [g for g in gen]
+        for inp,mask,gen in zip(input_tr, mask_tr, gen_tr)]
+
+    input_te = torch.cat(input_te, dim=0)
+    mask_te = torch.cat(mask_te, dim=0)
+    gen_te = torch.cat(gen_te, dim=0).view(len(idxs_te), args.eval_code_per_ex, 3, args.input_size, args.input_size)
+    images_te = [[inp] + [g for g in gen]
+        for inp,mask,gen in zip(input_te, mask_te, gen_te)]
+
+    return {"loss/test": loss_te / (len(data_te) * args.eval_code_per_ex),
+        "images/test": de_normalize(images_te),
+        "images/train": de_normalize(images_tr)}
 
 def parse_v_spec(args):
     """Returns the variational specification specifed in [args] but mapped to
     more useful values.
     """
     def parse_v_spec_helper(s):
-        if s == "add" or not s:
+        if s in ["add", "none"] or not s:
             return s
         elif s.starswith("downsample_mlp_"):
             hidden_dim = int(s[len("downsample_mlp_"):])
@@ -148,12 +229,18 @@ def get_args(args=None):
     P.add_argument("--wandb", choices=["disabled", "online", "offline"],
         default="online",
         help="Type of W&B logging")
-
-
+    P.add_argument("--finetune", choices=[0, 1], type=int, default=1,
+        help="Whether to finetune an existing MAE model or train from scratch")
+    P.add_argument("--v_spec", nargs="+",
+        help="Specification for making the autoencoder variational")
     P.add_argument("--arch", choices=["base_pretrained"], default="base_pretrained",
         help="Type of ViT model to use")
     P.add_argument("--resume", default=None,
         help="Path to checkpoint to resume")
+    P.add_argument("--suffix", type=str, default=None,
+        help="Optional suffix")
+
+    # Data arguments
     P.add_argument("--data_tr", required=True, choices=get_available_datasets(),
         help="String specifying training data")
     P.add_argument("--data_fn", required=True, choices=get_available_datasets() + ["cv"],
@@ -163,11 +250,26 @@ def get_args(args=None):
     P.add_argument("--data_path", default=data_dir,
         help="Path to where datasets are stored")
 
-    P.add_argument("--finetune", choices=[0, 1], type=int, default=1,
-        help="Whether to finetune an existing MAE model or train from scratch")
-    P.add_argument("--v_spec", nargs="+",
-        help="Specification for making the autoencoder variational")
+    # Evaluation arguments. Optimization here isn't too important because we can
+    # use saved models to get representations and do hyperparameter tuning.
+    P.add_argument("--num_ex_for_eval_tr", default=8,
+        help="Number of training examples to use in image logging")
+    P.add_argument("--num_ex_for_eval_te", default=8,
+        help="Number of testing examples to use in image logging")
+    P.add_argument("--eval_code_per_ex", default=16,
+        help="Number of testing examples to use in image logging")
+    P.add_argument("--codes_per_ex", type=int, default=128,
+        help="Number of codes to use per example in validation")
+    P.add_argument("--trials", type=int, default=3,
+        help="Number of trials to use in validation")
+    P.add_argument("--val_epochs", type=int, default=120,
+        help="Number of epochs to use in supervised linear probing")
+    P.add_argument("--val_bs", type=int, default=16,
+        help="Batch size to use in supervised linear probing")
+    P.add_argument("--val_lr", type=float, default=1e-3,
+        help="Learning rate to use in supervised linear probing")
 
+    # Training arguments
     P.add_argument("--epochs", type=int, default=64,
         help="Number of sampling/training steps to run")
     P.add_argument("--ex_per_epoch", type=int, default=512,
@@ -182,21 +284,22 @@ def get_args(args=None):
         help="Batch size for training")
     P.add_argument("--ipe", type=int, default=10240,
         help="Gradient steps per epoch (use a multiple of --bs // --mini_bs)")
-
     P.add_argument("--lr", type=float, default=1e-3,
         help="Base learning rate")
-
     P.add_argument("--mask_ratio", type=float, default=.75,
         help="Mask ratio for the model")
     P.add_argument("--res", default=256, type=int,
         help="Resolution to get data at")
     P.add_argument("--input_size", default=224, type=int,
         help="Size of (cropped) images to feed to the model")
+
+    # Hardware arguments
     P.add_argument("--gpus", nargs="+", default=[0, 1], type=int,
         help="Device IDs of GPUs to use")
-
     P.add_argument("--job_id", type=int, default=None,
         help="SLURM job_id if available")
+    P.add_argument("--num_workers", type=int, default=24,
+        help="Number of DataLoader workers")
 
     args = P.parse_args() if args is None else P.parse_args(args)
 
@@ -237,14 +340,15 @@ if __name__ == "__main__":
         res=args.res,
         data_path=args.data_path)
 
-    data_tr = XYDataset(data_tr, transform=get_train_transforms(args),
-        normalize=False) # Set to True when not debugging)
+    data_tr = XYDataset(data_tr, transform=get_train_transforms(args))
+    data_te = XYDataset(data_te, transform=get_train_transforms(args))
 
     # Construct [latent_shapes_dict] a dictionary giving all the latent shapes
     # needed to get noise to run [model]. We can pass it along with a [bs]
     # argument to sample_latent_dict() and it will give us the latents we need.
     t = torch.stack([data_tr[idx][0] for idx in range(args.sp * args.code_bs)])
-    latent_spec = model.module.get_latent_shape(t.to(device))
+    latent_spec = model.module.get_latent_shape(t.to(device),
+        mask_ratio=args.mask_ratio)
 
     ############################################################################
     # Complete training setup
@@ -259,7 +363,10 @@ if __name__ == "__main__":
     ############################################################################
     # Begin training
     ############################################################################
+    results = validate_pretrain(model, data_tr, data_te, latent_spec, args)
+    show_image_grid(results["images/test"])
 
+    scaler = torch.cuda.amp.GradScaler()
     log_iter = int(args.epochs * args.ipe / 10000)
     cur_step = (last_epoch + 1) * args.ipe
     for epoch in tqdm(range(args.epochs),
@@ -270,29 +377,34 @@ if __name__ == "__main__":
         batch_data_tr = Subset(data_tr, indices=kkm.pop_k(args.ex_per_epoch))
         batch_dataset = get_image_latent_dataset(model, batch_data_tr,
             latent_spec, args)
-        batch_loader = DataLoader(batch_dataset,
+        loader = DataLoader(batch_dataset,
             batch_size=args.mini_bs,
             shuffle=True,
-            num_workers=8,
+            num_workers=args.num_workers,
             pin_memory=True,
             collate_fn=ImageLatentDataset.collate_fn)
-        num_passes_over_loader = max(1, args.ipe // len(batch_loader))
-        batch_loader = chain(*[batch_loader] * num_passes_over_loader)
+        num_passes_over_loader = max(1, args.ipe // len(loader))
+        batch_loader = chain(*[loader] * num_passes_over_loader)
 
         for x,z in tqdm(batch_loader,
             desc="TRAINING: Minibatches",
             dynamic_ncols=True,
+            total=num_passes_over_loader * len(loader),
             leave=False):
 
             with torch.cuda.amp.autocast():
                 loss, _, _ = model(x, z, mask_ratio=args.mask_ratio)
                 loss = torch.mean(loss)
 
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
             optimizer.zero_grad(set_to_none=True)
+            scaler.update()
             scheduler.step()
-
             cur_step += 1
+
+            if cur_step % 25 == 0:
+                tqdm.write(f"{loss.item()}")
 
             if cur_step % log_iter == 0:
                 wandb.log({"loss/pretrain": loss.item(),
@@ -313,4 +425,24 @@ if __name__ == "__main__":
                 latent_spec={"latents": latent_spec["latents"]},
                 args=args)
 
-            wandb.log(val_results)
+            data_to_log = val_results | {"loss/pretrain": loss.item(),
+                "lr": scheduler.get_lr()}
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | \
+                lr {scheduler.get_lr():.5f} | \
+                loss/pretrain {data_to_log['loss/pretrain']} | \
+                loss/fn {data_to_log['loss_eval/finetune']} | \
+                loss/te {data_to_log['loss_eval/test']} | \
+                acc/te {data_to_log['accuracy/test']:.3f}±{data_to_log['accuracy_conf']:.3f}")
+        else:
+            data_to_log = {"loss/pretrain": loss.item(),
+                "lr": scheduler.get_lr()}
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | \
+                lr {scheduler.get_lr():.5f} | \
+                loss/pretrain {data_to_log['loss/pretrain']}")
+
+        wandb.log(data_to_log, step=cur_step)
+        torch.save({"model": model.cpu(), "optimizer": optimizer,
+            "scheduler": scheduler, "args": args, "last_epoch": epoch,
+            "kkm": kkm},
+            f"{model_folder(args)}/{epoch+1}.pt")
+        model = model.to(device)

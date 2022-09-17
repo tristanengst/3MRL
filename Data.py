@@ -16,19 +16,45 @@ def get_train_transforms(args):
             transforms.RandomResizedCrop(args.input_size,
                 scale=(0.2, 1.0), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.RandomHorizontalFlip(),
-            transforms.ToTensor()])
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
 def get_finetuning_transforms(args):
     return transforms.Compose([
         transforms.RandomResizedCrop(224, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.RandomHorizontalFlip(),
-        transforms.ToTensor()])
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
 def get_test_transforms(args):
     return transforms.Compose([
         transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(224),
-        transforms.ToTensor()])
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+
+def de_normalize(x):
+
+    if isinstance(x, list):
+        return [de_normalize(x_) for x_ in x]
+    else:
+        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device)
+        std = torch.tensor([0.229, 0.224, 0.225], device=x.device)
+        if isinstance(x, torch.Tensor) and len(x.shape) == 3:
+            mean = mean.unsqueeze(-1).unsqueeze(-1)
+            std = std.unsqueeze(-1).unsqueeze(-1)
+        elif isinstance(x, torch.Tensor) and len(x.shape) == 4:
+            mean = mean.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            std = std.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        elif isinstance(x, torch.Tensor) and len(x.shape) == 5:
+            return [de_normalize(x_) for x_ in x]
+        else:
+            raise NotImplementedError()
+            
+        mean = mean.expand(*x.shape)
+        std = std.expand(*x.shape)
+        return torch.multiply(x, std) + mean
+
 
 def get_available_datasets(data_dir=f"./data"):
     """Returns a list of all available datasets that can be interpreted by

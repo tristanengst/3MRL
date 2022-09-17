@@ -41,7 +41,6 @@ class MaskedAutoencoderViT(nn.Module):
             "norm_pix_loss": norm_pix_loss,
         }
 
-
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
@@ -187,6 +186,8 @@ class MaskedAutoencoderViT(nn.Module):
         return x, mask, ids_restore
 
     def forward_decoder(self, x, ids_restore):
+        ids_restore = ids_restore.repeat_interleave(len(x) // len(ids_restore), dim=0)
+
         # embed tokens
         x = self.decoder_embed(x)
 
@@ -225,6 +226,9 @@ class MaskedAutoencoderViT(nn.Module):
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
 
+        target = target.repeat_interleave(len(pred) // len(target), dim=0)
+        mask = mask.repeat_interleave(len(pred) // len(mask), dim=0)
+
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
         loss = loss * mask
@@ -243,7 +247,14 @@ class MaskedAutoencoderViT(nn.Module):
         return loss, pred, mask
 
 def extend_idx2v_method(idx2v_method, length):
-    """
+    """Returns [idx2v_method] extended to [length] by adding key-value pairs
+    where the value is False such that the returned dictionary has the first
+    [length] whole numbers as keys.
+
+    Args:
+    idx2v_method    -- mapping from the first N whole numbers to how/if blocks
+                        with their index should be variational
+    length          -- length to extend to
     """
     return {k: False for k in range(length)} | idx2v_method
 
@@ -270,6 +281,8 @@ class VariationalBlock(nn.Module):
         block_output = self.block(test_input)
         if self.v_method == "add":
             return block_output.shape[1:]
+        elif self.v_method == "none":
+            return block_output.shape[1:]
         elif isinstance(self.v_method, nn.Module):
             return self.v_method.get_latent_shape(block_output)
         else:
@@ -290,6 +303,9 @@ class VariationalBlock(nn.Module):
         if self.v_method == "add":
             fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
             return fx + z
+        elif self.v_method == "none":
+            fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
+            return fx
         elif isinstance(self.v_method, nn.Module):
             return self.v_method(fx, z)
         else:
@@ -305,20 +321,16 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
                         mapping is False, the ith block will not be made
                         variational. Otherwise, it will be replaced with a
                         VariationalBlock using the value as [v_method]
+    v_mae_model     -- MaskedViTVAE model instance. Its encoders weights and way
+                        of being variational will be used
     kwargs          -- arguments for constructing the ViT architecture
     """
-
     def __init__(self, idx2v_modules, v_mae_model=None, **kwargs):
         if v_mae_model is None:
             super(VisionTransformer, self).__init__(**kwargs)
         else:
             super(VisionTransformer, self).__init__(**v_mae_model.kwargs)
 
-        # Replace the normal ModuleList [blocks] with a dictionary mapping from
-        # block indices to the blocks, with some of the blocks made variational
-        # (ie. accept a representation and noise as input, and fuse the two in
-        # the output). This is way of adding variationalness can be adapted to
-        # many different architectures.
         self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
         idx2block = [VariationalBlock(b, vm) if vm else b
             for b,vm in zip(self.blocks, self.idx2v_method.values())]
@@ -337,7 +349,7 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
             self.fc_norm = norm_layer(embed_dim)
             del self.norm
 
-        if if mae_model is None:
+        if v_mae_model is None:
             self.load_state_dict(v_mae_model.state_dict())
 
     def get_latent_shape(self, test_input=torch.ones(4, 3, 224, 224, device=device), mask_ratio=1):
