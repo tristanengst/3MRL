@@ -36,3 +36,8 @@ foo
 ```
 
 ### Downloadable Checkpoints
+
+### Setting up ImageNet
+1. Download the relevant files.
+2. Place [this `.sh` script](https://gist.github.com/BIGBALLON/8a71d225eff18d88e469e6ea9b39cef4) in the directory and run it, producing two ImageFolder-compatible directories.
+2.

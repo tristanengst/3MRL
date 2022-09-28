@@ -15,6 +15,7 @@ from timm.models.vision_transformer import PatchEmbed, Block
 from original_code.util import pos_embed as PE
 
 from Utils import *
+from Augmentation import de_normalize
 
 class MaskedAutoencoderViT(nn.Module):
     """Masked Autoencoder with VisionTransformer backbone."""
@@ -22,7 +23,6 @@ class MaskedAutoencoderViT(nn.Module):
         depth=24, num_heads=16, decoder_embed_dim=512, decoder_depth=8,
         decoder_num_heads=16, mlp_ratio=4., norm_layer=nn.LayerNorm,
         norm_pix_loss=False, verbose=False):
-
         super(MaskedAutoencoderViT, self).__init__()
 
         # Save variables needed in making this variational
@@ -41,45 +41,44 @@ class MaskedAutoencoderViT(nn.Module):
             "norm_pix_loss": norm_pix_loss,
         }
 
-        # --------------------------------------------------------------------------
+        self.encoder_kwargs = {
+            "img_size": img_size,
+            "patch_size": patch_size,
+            "in_chans": in_chans,
+            "embed_dim": embed_dim,
+            "depth": depth,
+            "num_heads": num_heads,
+            "mlp_ratio": mlp_ratio,
+            "norm_layer": norm_layer,
+        }
+
         # MAE encoder specifics
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
-
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # fixed sin-cos embedding
-
         self.blocks = nn.ModuleList([
             Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
-        # --------------------------------------------------------------------------
 
-        # --------------------------------------------------------------------------
         # MAE decoder specifics
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
-
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
-
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
-
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(decoder_depth)])
-
         self.decoder_norm = norm_layer(decoder_embed_dim)
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
-        # --------------------------------------------------------------------------
 
         self.norm_pix_loss = norm_pix_loss
-
         self.initialize_weights()
 
         if verbose:
             tqdm.write(f"LOG: Constructed MaskedAutoencoderViT model | num_blocks {len(self.blocks)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
 
     def initialize_weights(self):
-        # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
         pos_embed = PE.get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
@@ -119,8 +118,7 @@ class MaskedAutoencoderViT(nn.Module):
         h = w = imgs.shape[2] // p
         x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
         x = torch.einsum('nchpwq->nhwpqc', x)
-        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
-        return x
+        return x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
 
     def unpatchify(self, x):
         """
@@ -133,34 +131,34 @@ class MaskedAutoencoderViT(nn.Module):
 
         x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
         x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
-        return imgs
+        return x.reshape(shape=(x.shape[0], 3, h * p, h * p))
 
-    def random_masking(self, x, mask_ratio):
+    def random_masking(self, x, mask_ratio, mask_noise=None):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
         x: [N, L, D], sequence
+
+        Args:
+        x           -- input to mask
+        mask_ratio  -- fraction to mask
+        mask_noise  -- noise to construct the mask with or None to generate it
         """
-        N, L, D = x.shape  # batch, length, dim
+        N, L, D = x.shape
         len_keep = int(L * (1 - mask_ratio))
 
-        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        if mask_noise is None:  # batch, length, dim
+            mask_noise = torch.rand(N, L, device=x.device)
+        else:
+            mask_noise = mask_noise
 
-        # sort noise for each sample
-        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_shuffle = torch.argsort(mask_noise, dim=1)
         ids_restore = torch.argsort(ids_shuffle, dim=1)
-
-        # keep the first subset
         ids_keep = ids_shuffle[:, :len_keep]
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-
-        # generate the binary mask: 0 is keep, 1 is remove
         mask = torch.ones([N, L], device=x.device)
         mask[:, :len_keep] = 0
-        # unshuffle to get the binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)
-
         return x_masked, mask, ids_restore
 
     def forward_encoder(self, x, mask_ratio):
@@ -182,7 +180,6 @@ class MaskedAutoencoderViT(nn.Module):
         for blk in self.blocks:
             x = blk(x)
         x = self.norm(x)
-
         return x, mask, ids_restore
 
     def forward_decoder(self, x, ids_restore):
@@ -210,7 +207,6 @@ class MaskedAutoencoderViT(nn.Module):
 
         # remove cls token
         x = x[:, 1:, :]
-
         return x
 
     def forward_loss(self, imgs, pred, mask, reduction="mean"):
@@ -240,10 +236,18 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             raise NotImplementedError()
 
-    def forward(self, imgs, mask_ratio=0.75, reduction="mean"):
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+    def forward(self, x, mask_ratio=0.75, reduction="mean"):
+        """
+        Args:
+        x           -- BSxCxHxW tensor of images to encode
+        mask_ratio  -- mask ratio
+        """
+        latent, mask, ids_restore = self.forward_encoder(x, mask_ratio)
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        loss = self.forward_loss(imgs, pred, mask, reduction=reduction)
+        loss = self.forward_loss(x, pred, mask, reduction=reduction)
+        pred = de_normalize(self.unpatchify(pred))
+        mask = mask.unsqueeze(-1).repeat(1, 1, self.patch_embed.patch_size[0]**2 *3)
+        mask = self.unpatchify(mask)
         return loss, pred, mask
 
 def extend_idx2v_method(idx2v_method, length):
@@ -272,7 +276,7 @@ class VariationalBlock(nn.Module):
         self.block = block
         self.v_method = v_method
 
-    def get_latent_shape(self, test_input=torch.ones(4, 3, 224, 224, device=device)):
+    def get_latent_spec(self, test_input=torch.ones(4, 3, 224, 224, device=device)):
         """Returns the latent shape minus the batch dimension for the network.
 
         Args:
@@ -281,10 +285,8 @@ class VariationalBlock(nn.Module):
         block_output = self.block(test_input)
         if self.v_method == "add":
             return block_output.shape[1:]
-        elif self.v_method == "none":
-            return block_output.shape[1:]
         elif isinstance(self.v_method, nn.Module):
-            return self.v_method.get_latent_shape(block_output)
+            return self.v_method.get_latent_spec(block_output)
         else:
             raise NotImplementedError()
 
@@ -303,15 +305,12 @@ class VariationalBlock(nn.Module):
         if self.v_method == "add":
             fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
             return fx + z
-        elif self.v_method == "none":
-            fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
-            return fx
         elif isinstance(self.v_method, nn.Module):
             return self.v_method(fx, z)
         else:
             raise NotImplementedError()
 
-class VariationaViT(timm.models.vision_transformer.VisionTransformer):
+class VariationalViT(timm.models.vision_transformer.VisionTransformer):
     """ViT, but with the ability to add Gaussian noise at some place in the
     forward pass.
 
@@ -320,16 +319,22 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
                         how they should be variational. If the ith value in the
                         mapping is False, the ith block will not be made
                         variational. Otherwise, it will be replaced with a
-                        VariationalBlock using the value as [v_method]
+                        VariationalBlock using the value as [v_method].
+
+                        All missing key-value pairs will be added with the value
+                        set to False.
     v_mae_model     -- MaskedViTVAE model instance. Its encoders weights and way
                         of being variational will be used
     kwargs          -- arguments for constructing the ViT architecture
     """
-    def __init__(self, idx2v_modules, v_mae_model=None, **kwargs):
-        if v_mae_model is None:
-            super(VisionTransformer, self).__init__(**kwargs)
-        else:
-            super(VisionTransformer, self).__init__(**v_mae_model.kwargs)
+    def __init__(self, idx2v_method={}, v_mae_model=None, global_pool=False,
+        num_classes=1000, **kwargs):
+
+        # The architecture [v_mae_model] overrides that in [kwargs] if possible
+        kwargs = kwargs | {"num_classes": num_classes}
+        if not v_mae_model is None:
+            kwargs |= de_dataparallel(v_mae_model).encoder_kwargs
+        super(VariationalViT, self).__init__(**kwargs)
 
         self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
         idx2block = [VariationalBlock(b, vm) if vm else b
@@ -351,8 +356,10 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
 
         if v_mae_model is None:
             self.load_state_dict(v_mae_model.state_dict())
+        
+        self.latent_spec = None
 
-    def get_latent_shape(self, test_input=torch.ones(4, 3, 224, 224, device=device), mask_ratio=1):
+    def get_latent_spec(self, test_input=torch.ones(4, 3, 224, 224, device=device), mask_ratio=0):
         """Returns the latent shape minus the batch dimension for the network.
 
         Args:
@@ -361,33 +368,32 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
         """
         shapes = []
         with torch.no_grad():
-            # Forward method, but can adds computed shapes to [shapes]
+            B = test_input.shape[0]
             x = self.patch_embed(test_input)
-            x = x + self.pos_embed[:, 1:, :]
 
-            # Shape of noise needed for the mask
-            mask_noise_shape = (x.shape[1],)
-
-            x, mask, ids_restore = self.random_masking(x, mask_ratio)
-            cls_token = self.cls_token + self.pos_embed[:, :1, :]
-            cls_tokens = cls_token.expand(x.shape[0], -1, -1)
+            cls_tokens = self.cls_token.expand(B, -1, -1)
             x = torch.cat((cls_tokens, x), dim=1)
+            x = x + self.pos_embed
+            x = self.pos_drop(x)
 
             for idx,block in self.idx2block.items():
                 if int(idx) in self.block_idx2z_idx:
-                    s = block.get_latent_shape(test_input=x)
+                    s = block.get_latent_spec(test_input=x)
                     shapes.append(s)
                     x = block(x, torch.ones(len(x), *s, device=device))
                 else:
                     x = block(x)
 
-        if len(set(shapes)) == 1:
-            return {"mask_noise": {"shape": mask_noise_shape, "batch_dim": 0},
-                "latents": {"shape": (len(shapes),) + shapes[0], "batch_dim": 0}}
+        if len(set(shapes)) == 0:
+            self.latent_spec = {"latents": None}
+        elif len(set(shapes)) == 1:
+            self.latent_spec = {"latents": (len(shapes),) + shapes[0]}
         else:
             raise ValueError(f"Got multiple shapes for latent codes: {shapes}")
+        
+        return self.latent_spec
 
-    def forward_features(self, x, z):
+    def forward_features(self, x, ze):
         """Returns representations for [x].
 
         Args:
@@ -404,9 +410,9 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
 
         # The only change from a normal ViT architecture. When we encounter a
         # VariationalBlock, it gets to have its noise fed to it too.
-        for idx,block in self.blocks.items():
+        for idx,block in self.idx2block.items():
             if int(idx) in self.block_idx2z_idx:
-                x = block(x, z[self.block_idx2z_idx[idx]])
+                x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]])
             else:
                 x = block(x)
 
@@ -419,12 +425,22 @@ class VariationaViT(timm.models.vision_transformer.VisionTransformer):
 
         return outcome
 
-    def forward(self, x, z):
+    def forward(self, x, z=None, noise="gaussian", z_per_ex=1):
+        if z is None and self.latent_spec is None:
+            latent_spec = self.get_latent_spec()
+        elif z is None and not self.latent_spec is None:
+            latent_spec = self.latent_spec
+        else:
+            pass
+
+        if z is None:
+            z = sample_latent_dict(latent_spec, bs=len(x) * z_per_ex, noise=noise)
+
         fx = self.forward_features(x, z)
         fx = self.forward_head(fx)
         return fx
 
-class MaskedViTVAE(MaskedAutoencoderViT):
+class MaskedVAEViT(MaskedAutoencoderViT):
     """Masked VAE with VisionTransformer backbone.
 
     Args:
@@ -432,7 +448,10 @@ class MaskedViTVAE(MaskedAutoencoderViT):
                         how they should be variational. If the ith value in the
                         mapping is False, the ith block will not be made
                         variational. Otherwise, it will be replaced with a
-                        VariationalBlock using the value as [v_method]
+                        VariationalBlock using the value as [v_method].
+
+                        All missing key-value pairs will be added with the value
+                        set to False.
     mae_model       -- None or MaskedAutoencoderViT instance. If the former,
                         values in [kwargs] are used to specify the ViT
                         architecture; if the latter, the architecture of
@@ -440,11 +459,11 @@ class MaskedViTVAE(MaskedAutoencoderViT):
     **kwargs        -- same kwargs as for a MaskedAutoencoderViT. Ignored if
                         [mae_model] is specified.
     """
-    def __init__(self, idx2v_method, mae_model=None, **kwargs):
+    def __init__(self, idx2v_method={}, mae_model=None, **kwargs):
         if mae_model is None:
-            super(MaskedViTVAE, self).__init__(**kwargs)
+            super(MaskedVAEViT, self).__init__(**kwargs)
         else:
-            super(MaskedViTVAE, self).__init__(**mae_model.kwargs)
+            super(MaskedVAEViT, self).__init__(**mae_model.kwargs)
             self.load_state_dict(mae_model.state_dict())
 
         # Replace the normal ModuleList [blocks] with a dictionary mapping from
@@ -465,39 +484,7 @@ class MaskedViTVAE(MaskedAutoencoderViT):
 
         tqdm.write(f"LOG: Constructed MaskedViTVAE model | num_blocks {len(self.idx2block)} | latent to block mapping {self.block_idx2z_idx} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
 
-    def random_masking(self, x, mask_ratio, mask_noise=None):
-        """
-        Perform per-sample random masking by per-sample shuffling.
-        Per-sample shuffling is done by argsort random noise.
-        x: [N, L, D], sequence
-
-        Args:
-        x           -- input to mask
-        mask_ratio  -- fraction to mask
-        mask_noise  -- noise to construct the mask with or None to generate it
-        """
-        N, L, D = x.shape  # batch, length, dim
-        len_keep = int(L * (1 - mask_ratio))
-
-        mask_noise = torch.rand(N, L, device=x.device) if mask_noise is None else mask_noise
-
-        # sort noise for each sample
-        ids_shuffle = torch.argsort(mask_noise, dim=1)  # ascend: small is keep, large is remove
-        ids_restore = torch.argsort(ids_shuffle, dim=1)
-
-        # keep the first subset
-        ids_keep = ids_shuffle[:, :len_keep]
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-
-        # generate the binary mask: 0 is keep, 1 is remove
-        mask = torch.ones([N, L], device=x.device)
-        mask[:, :len_keep] = 0
-        # unshuffle to get the binary mask
-        mask = torch.gather(mask, dim=1, index=ids_restore)
-
-        return x_masked, mask, ids_restore
-
-    def get_latent_shape(self, test_input=torch.ones(4, 3, 224, 224, device=device),
+    def get_latent_spec(self, test_input=torch.ones(4, 3, 224, 224, device=device),
         mask_ratio=.75):
         """Returns the latent shape minus the batch dimension for the network.
         Concretely, this is a list of tuples. Th
@@ -508,7 +495,6 @@ class MaskedViTVAE(MaskedAutoencoderViT):
         """
         shapes = []
         with torch.no_grad():
-            # Forward method, but can adds computed shapes to [shapes]
             x = self.patch_embed(test_input)
             x = x + self.pos_embed[:, 1:, :]
 
@@ -522,15 +508,18 @@ class MaskedViTVAE(MaskedAutoencoderViT):
 
             for idx,block in self.idx2block.items():
                 if int(idx) in self.block_idx2z_idx:
-                    s = block.get_latent_shape(test_input=x)
+                    s = block.get_latent_spec(test_input=x)
                     shapes.append(s)
                     x = block(x, torch.ones(len(x), *s, device=device))
                 else:
                     x = block(x)
 
-        if len(set(shapes)) == 1:
-            return {"mask_noise": {"shape": mask_noise_shape, "batch_dim": 0},
-                "latents": {"shape": (len(shapes),) + shapes[0], "batch_dim": 0}}
+        if len(set(shapes)) == 0:
+            return {"mask_noise": mask_noise_shape,
+                "latents": None}
+        elif len(set(shapes)) == 1:
+            return {"mask_noise": mask_noise_shape,
+                "latents": (len(shapes),) + shapes[0]}
         else:
             raise ValueError(f"Got multiple shapes for latent codes: {shapes}")
 
@@ -539,22 +528,15 @@ class MaskedViTVAE(MaskedAutoencoderViT):
 
         Args:
         x           -- BSxCxHxW tensor of images to encode
-        z           -- dictionary with keys 'mask_noise' and 'latents', which
-                        should each map to a tensor filled with noise with
-                        shapes given by the output of get_latent_shape()
+        z           -- dictionary with keys 'mask_noise' and 'latents'. Each
+                        should map to a BSx... tensor with the non-zero
+                        dimensions given by get_latent_spec().
         mask_ratio  -- mask ratio
         """
-        # embed patches
         x = self.patch_embed(x)
-
-        # add pos embed w/o cls token
         x = x + self.pos_embed[:, 1:, :]
-
-        # masking: length -> length * mask_ratio
         x, mask, ids_restore = self.random_masking(x, mask_ratio,
             mask_noise=z["mask_noise"])
-
-        # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
@@ -564,25 +546,37 @@ class MaskedViTVAE(MaskedAutoencoderViT):
         for idx,block in self.idx2block.items():
             if int(idx) in self.block_idx2z_idx:
                 x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]])
+                assert 0
             else:
                 x = block(x)
 
         x = self.norm(x)
         return x, mask, ids_restore
 
-    def forward(self, x, z, mask_ratio=0.75, reduction="mean"):
-        """
+    def forward(self, x, z, mask_ratio=0.75, reduction="mean", return_all=False):
+        """Forward function returning the loss, reconstructed image, and mask.
+
         Args:
         x           -- BSxCxHxW tensor of images to encode
-        z           -- dictionary with keys 'mask_noise' and 'latents', which
-                        should each map to a tensor filled with noise with
-                        shapes given by the output of get_latent_shape()
+        z           -- dictionary with keys 'mask_noise' and 'latents'. Each
+                        should map to a BSx... tensor with the non-zero
+                        dimensions given by get_latent_spec().
         mask_ratio  -- mask ratio
+        reduction   -- reduction applied to returned loss
+        return_all  -- whether to return a (loss, images, masks) tuple or just loss
         """
-        latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        loss = self.forward_loss(x, pred, mask, reduction=reduction)
-        return loss, pred, mask
+        if return_all:
+            latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio)
+            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+            loss = self.forward_loss(x, pred, mask, reduction=reduction)
+            pred = de_normalize(self.unpatchify(pred))
+            mask = mask.unsqueeze(-1).repeat(1, 1, self.patch_embed.patch_size[0]**2 *3)
+            mask = self.unpatchify(mask)
+            return loss, pred, mask
+        else:
+            latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio)
+            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+            return self.forward_loss(x, pred, mask, reduction=reduction)
 
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):

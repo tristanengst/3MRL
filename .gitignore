@@ -5,9 +5,12 @@
 *.JPG
 *.JPEG
 *.lmdb
+*.beton
 *.LMDB
 *.pt
 *.pth
 *__pycache__
 *models
 *wandb
+*output_dir
+*data

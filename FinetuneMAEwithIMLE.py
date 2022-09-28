@@ -10,8 +10,12 @@ from torch.optim import AdamW
 import torch.nn
 from torch.utils.data import DataLoader, Subset, Dataset
 
+from original_code.models_mae import mae_vit_base_patch16 as foo
+
+from Augmentation import *
 from ApexUtils import *
 from Data import *
+from LinearProbe import linear_probe
 from Models import *
 from Utils import *
 
@@ -101,8 +105,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
                 latents = sample_latent_dict(latents_only_spec, bs * args.sp)
                 z = {"mask_noise": mask_noise_} | latents
                 with torch.cuda.amp.autocast():
-                    losses, _, _ = model(x, z,
-                        mask_ratio=args.mask_ratio,
+                    losses = model(x, z, mask_ratio=args.mask_ratio,
                         reduction="batch")
                 _, idxs = torch.min(losses.view(bs, args.sp), dim=1)
 
@@ -118,111 +121,85 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
     all_images = torch.cat(all_images, axis=0).cpu()
     return ImageLatentDataset(all_images, mask_noise.cpu(), best_latents.cpu())
 
-def validate_pretrain(model, data_tr, data_te, latent_spec, args):
-    """Returns validation information about [model] vis à vis pretraining.
+def validate(model, data_tr, data_fn, data_te, args):
+    """Returns a dictionary of validation data about [model].
 
     Args:
     model       -- MaskedVAEViT model
-    data_tr     -- ImageFolder-like dataset with transforms of training data
-    data_te     -- ImageFolder-like dataset with transforms of testing data
-    latent_spec -- dictionary giving the latent specification for model
+    data_tr     -- Dataset of training data for reconstruction
+    data_tr     -- Dataset of data for linear probe training
+    data_tr     -- Dataset of testing data for linear probes and reconstruction
     args        -- Namespace with relevant parameters
     """
+    def get_reconstruction_images_loss(model, dataset, latent_spec, args):
+        """Returns an (loss, image_grid) tuple, where [loss] is the average loss
+        of [model] on reconstructing images from [dataset] and [image_grid]  is
+        a grid of images for qualitatively evaluating the reconstructions.
+
+        Args:
+        model       -- MaskedVAEViT model
+        dataset     -- Dataset containing all the data to use in reconstruction
+        latent_spec -- dictionary giving the latent specification for [model]
+        args        -- Namespace with relevant parameters
+        """
+        loader = DataLoader(dataset,
+            batch_size=args.code_bs,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            shuffle=False)
+
+        images, preds, masks, total_loss = [], [], [], 0
+        with torch.no_grad():
+            for x,_ in tqdm(loader,
+                desc="Validation: computing reconstruction loss and image grid",
+                leave=False,
+                dynamic_ncols=True):
+
+                z_bs = {"mask_noise": len(x), "latents": len(x) * args.z_per_ex}
+                z = sample_latent_dict(latent_spec, z_bs, noise=args.noise)
+                with torch.cuda.amp.autocast():
+                    loss, pred, mask = model(x, z,
+                        mask_ratio=args.mask_ratio,
+                        return_all=True)
+                total_loss += (loss.mean() * len(x)).item()
+                images.append(de_normalize(x).cpu())
+                preds.append(pred.cpu())
+                masks.append(mask.cpu())
+
+        images = torch.cat(images, dim=0)
+        masks = torch.cat(masks, dim=0)
+        preds = torch.cat(preds, dim=0)
+        preds = preds.view(len(dataset), args.z_per_ex, *preds.shape[1:])
+        image_grid = [[image] + [p for p in pred]
+            for image,pred in zip(images, preds)]
+
+        return total_loss / (len(dataset) * args.z_per_ex), image_grid
+
+    ############################################################################
+    # See how well the model is doing as a VAE
+    ############################################################################
+    t = torch.stack([data_tr[0][0]])
+    latent_spec = model.module.get_latent_spec(t.to(device),
+        mask_ratio=args.mask_ratio)
     idxs_tr = torch.linspace(0, len(data_tr) - 1, args.num_ex_for_eval_tr)
-    idxs_tr = [int(idx) for idx in idxs_tr.tolist()]
-    loader_tr = DataLoader(Subset(data_tr, indices=idxs_tr),
-        batch_size=args.code_bs,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        shuffle=False)
+    idxs_te = torch.linspace(0, len(data_te) - 1, args.num_ex_for_eval_te)
+    vae_loss_tr, images_tr = get_reconstruction_images_loss(model,
+        Subset(data_tr, [int(idx) for idx in idxs_tr.tolist()]),
+        latent_spec, args)
+    vae_loss_te, images_te = get_reconstruction_images_loss(model,
+        Subset(data_te, [int(idx) for idx in idxs_te.tolist()]),
+        latent_spec, args)
 
-    idxs_te = torch.linspace(0, len(data_tr) - 1, args.num_ex_for_eval_te)
-    idxs_te = [int(idx) for idx in idxs_te.tolist()]
-    loader_te = DataLoader(Subset(data_te, indices=idxs_te),
-        batch_size=args.code_bs,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        shuffle=False)
+    ############################################################################
+    # Do linear probing to see how well the model's weights work in ViT
+    ############################################################################
+    lin_probe_results = linear_probe(model, data_fn=data_fn, data_te=data_te,
+        args=args)
+    model = model.to(device)
 
-    with torch.no_grad():
-
-        input_tr, gen_tr, mask_tr = [], [], []
-        for x,_ in tqdm(loader_tr,
-            desc="Validation: test data",
-            leave=False,
-            dynamic_ncols=True):
-
-            z = sample_latent_dict(latent_spec, len(x) * args.eval_code_per_ex)
-            z["mask_noise"] = z["mask_noise"][:len(x)]
-            with torch.cuda.amp.autocast():
-                loss, pred, mask = model(x, z,
-                    mask_ratio=args.mask_ratio,
-                    reduction="batch")
-            input_tr.append(x.cpu())
-            gen_tr.append(pred.cpu())
-            mask_tr.append(mask.cpu())
-
-            tqdm.write(f"VAL SHAPES {mask.shape} | {pred.shape} | {x.shape}")
-
-        input_te, gen_te, mask_te, loss_te = [], [], [], 0
-        for x,_ in tqdm(loader_te,
-            desc="Validation: test data",
-            leave=False,
-            dynamic_ncols=True):
-
-            z = sample_latent_dict(latent_spec, len(x) * args.eval_code_per_ex)
-            z["mask_noise"] = z["mask_noise"][:len(x)]
-            with torch.cuda.amp.autocast():
-                loss, pred, mask = model(x, z,
-                    mask_ratio=args.mask_ratio,
-                    reduction="batch")
-            loss_te += loss.sum().item()
-            input_te.append(x.cpu())
-            gen_te.append(pred.cpu())
-            mask_te.append(mask.cpu())
-            tqdm.write(f"---------------------------{pred.shape}")
-            show_image_grid(de_normalize(pred.view(len(x), args.eval_code_per_ex, 3, 224, 224)))
-
-            tqdm.write(f"VAL SHAPES {mask.shape} | {pred.shape} | {x.shape}")
-
-    input_tr = torch.cat(input_te, dim=0)
-    mask_tr = torch.cat(mask_te, dim=0)
-    gen_tr = torch.cat(gen_te, dim=0).view(len(idxs_tr), args.eval_code_per_ex, 3, args.input_size, args.input_size)
-    images_tr = [[inp] + [g for g in gen]
-        for inp,mask,gen in zip(input_tr, mask_tr, gen_tr)]
-
-    input_te = torch.cat(input_te, dim=0)
-    mask_te = torch.cat(mask_te, dim=0)
-    gen_te = torch.cat(gen_te, dim=0).view(len(idxs_te), args.eval_code_per_ex, 3, args.input_size, args.input_size)
-    images_te = [[inp] + [g for g in gen]
-        for inp,mask,gen in zip(input_te, mask_te, gen_te)]
-
-    return {"loss/test": loss_te / (len(data_te) * args.eval_code_per_ex),
-        "images/test": de_normalize(images_te),
-        "images/train": de_normalize(images_tr)}
-
-def parse_v_spec(args):
-    """Returns the variational specification specifed in [args] but mapped to
-    more useful values.
-    """
-    def parse_v_spec_helper(s):
-        if s in ["add", "none"] or not s:
-            return s
-        elif s.starswith("downsample_mlp_"):
-            hidden_dim = int(s[len("downsample_mlp_"):])
-            raise NotImplementedError()
-        else:
-            raise NotImplementedError()
-
-    key_args = [int(k) for idx,k in enumerate(args.v_spec) if idx % 2 == 0]
-    val_args = [v for idx,v in enumerate(args.v_spec) if idx % 2 == 1]
-    spec = {k: v for k,v in zip(key_args, val_args)}
-
-    max_specified_key = max(key_args)
-    non_variational_layers = {idx: False for idx in range(max_specified_key)}
-    spec = non_variational_layers | spec
-
-    return {k: parse_v_spec_helper(v) for k,v in spec.items()}
+    return lin_probe_results | {"loss/vae_test": vae_loss_te,
+        "images/vae_train": images_to_pil_image(images_tr),
+        "images/vae_test": images_to_pil_image(images_te)}
 
 def get_args(args=None):
     P = argparse.ArgumentParser()
@@ -231,7 +208,7 @@ def get_args(args=None):
         help="Type of W&B logging")
     P.add_argument("--finetune", choices=[0, 1], type=int, default=1,
         help="Whether to finetune an existing MAE model or train from scratch")
-    P.add_argument("--v_spec", nargs="+",
+    P.add_argument("--v_spec", nargs="*", default=[],
         help="Specification for making the autoencoder variational")
     P.add_argument("--arch", choices=["base_pretrained"], default="base_pretrained",
         help="Type of ViT model to use")
@@ -253,21 +230,25 @@ def get_args(args=None):
     # Evaluation arguments. Optimization here isn't too important because we can
     # use saved models to get representations and do hyperparameter tuning.
     P.add_argument("--num_ex_for_eval_tr", default=8,
-        help="Number of training examples to use in image logging")
+        help="Number of training examples for logging")
     P.add_argument("--num_ex_for_eval_te", default=8,
-        help="Number of testing examples to use in image logging")
-    P.add_argument("--eval_code_per_ex", default=16,
-        help="Number of testing examples to use in image logging")
-    P.add_argument("--codes_per_ex", type=int, default=128,
-        help="Number of codes to use per example in validation")
-    P.add_argument("--trials", type=int, default=3,
-        help="Number of trials to use in validation")
+        help="Number of training examples for logging")
+    P.add_argument("--z_per_ex", default=6,
+        help="Number of latents per example for logging")
+    P.add_argument("--z_per_ex_eval", type=int, default=16,
+        help="Number of codes to use per example in linear probing")
+    P.add_argument("--trials", type=int, default=1,
+        help="Number of trials to use in linear probe")
+    P.add_argument("--num_val_ex", type=int, default=1024,
+        help="Number of examples to use for validation")
     P.add_argument("--val_epochs", type=int, default=120,
-        help="Number of epochs to use in supervised linear probing")
-    P.add_argument("--val_bs", type=int, default=16,
+        help="Number of epochs to use in linear probing")
+    P.add_argument("--val_bs", type=int, default=8,
         help="Batch size to use in supervised linear probing")
     P.add_argument("--val_lr", type=float, default=1e-3,
-        help="Learning rate to use in supervised linear probing")
+        help="Learning rate to use in linear probing")
+    P.add_argument("--global_pool", type=int, default=0, choices=[0, 1],
+        help="Whether to use global pooling in forming representations")
 
     # Training arguments
     P.add_argument("--epochs", type=int, default=64,
@@ -277,7 +258,7 @@ def get_args(args=None):
     P.add_argument("--code_bs", type=int, default=4,
         help="Batch size for sampling")
     P.add_argument("--ns", type=int, default=1024,
-        help="Number of latent codes to generate per image during sampling")
+        help="Number of latents from which to choose per image for sampling")
     P.add_argument("--sp", type=int, default=4,
         help="Per-image latent code parallelism during sampling")
     P.add_argument("--mini_bs", type=int, default=64,
@@ -288,22 +269,31 @@ def get_args(args=None):
         help="Base learning rate")
     P.add_argument("--mask_ratio", type=float, default=.75,
         help="Mask ratio for the model")
+    P.add_argument("--n_ramp", type=int, default=10,
+        help="Number of epochs of linear learning rate warmup")
     P.add_argument("--res", default=256, type=int,
         help="Resolution to get data at")
     P.add_argument("--input_size", default=224, type=int,
         help="Size of (cropped) images to feed to the model")
+    P.add_argument("--noise", default="gaussian", choices=["gaussian", "zeros"],
+        help="Kind of noise to add inside the model")
 
     # Hardware arguments
     P.add_argument("--gpus", nargs="+", default=[0, 1], type=int,
         help="Device IDs of GPUs to use")
     P.add_argument("--job_id", type=int, default=None,
         help="SLURM job_id if available")
-    P.add_argument("--num_workers", type=int, default=24,
+    P.add_argument("--num_workers", type=int, default=20,
         help="Number of DataLoader workers")
 
     args = P.parse_args() if args is None else P.parse_args(args)
 
     args.uid = wandb.util.generate_id() if args.job_id is None else args.job_id
+
+    if len(args.v_spec) == 0:
+        tqdm.write(f"WARNING: empty --v_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
+        args.z_per_ex = 1
+        args.z_per_ex_eval = 1
     return args
 
 if __name__ == "__main__":
@@ -325,29 +315,33 @@ if __name__ == "__main__":
             raise NotImplementedError()
 
         model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
-        model = MaskedViTVAE(parse_v_spec(args), **model_kwargs)
+        model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs)
         model = nn.DataParallel(model, device_ids=args.gpus).to(device)
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-6)
         last_epoch = -1
     else:
         raise NotImplementedError()
 
-
+    save_dir = model_folder(args)
     ############################################################################
     # Get the datasets
     ############################################################################
-    data_tr, data_fn, data_te = get_imagefolder_data(args.data_tr, args.data_fn, args.data_te,
-        res=args.res,
-        data_path=args.data_path)
-
+    data_tr, data_fn, data_te = get_imagefolder_data(args.data_tr, args.data_fn,
+        args.data_te, res=args.res, data_path=args.data_path)
     data_tr = XYDataset(data_tr, transform=get_train_transforms(args))
-    data_te = XYDataset(data_te, transform=get_train_transforms(args))
+    data_fn = XYDataset(data_fn, transform=get_finetuning_transforms(args))
+    data_te = XYDataset(data_te, transform=get_test_transforms(args))
+
+
+
+
+
 
     # Construct [latent_shapes_dict] a dictionary giving all the latent shapes
     # needed to get noise to run [model]. We can pass it along with a [bs]
     # argument to sample_latent_dict() and it will give us the latents we need.
     t = torch.stack([data_tr[idx][0] for idx in range(args.sp * args.code_bs)])
-    latent_spec = model.module.get_latent_shape(t.to(device),
+    latent_spec = model.module.get_latent_spec(t.to(device),
         mask_ratio=args.mask_ratio)
 
     ############################################################################
@@ -356,6 +350,7 @@ if __name__ == "__main__":
     kkm = KOrKMinusOne(range(len(data_tr)), shuffle=True)
     scheduler = CosineAnnealingWarmupRestarts(optimizer,
         first_cycle_steps=args.epochs * args.ipe,
+        warmup_steps=args.n_ramp * args.ipe,
         max_lr=args.lr,
         min_lr=args.lr / 100,
         last_epoch=-1 if last_epoch == -1 else last_epoch * args.ipe)
@@ -363,12 +358,25 @@ if __name__ == "__main__":
     ############################################################################
     # Begin training
     ############################################################################
-    results = validate_pretrain(model, data_tr, data_te, latent_spec, args)
-    show_image_grid(results["images/test"])
+    if last_epoch == -1:
+        results = validate(model, data_tr, data_fn, data_te, args)
+        if not os.path.exists(f"{save_dir}/images"):
+            os.makedirs(f"{save_dir}/images")
+        results["images/vae_train"].save(f"{save_dir}/images/0_train.png")
+        results["images/vae_test"].save(f"{save_dir}/images/0_test.png")
+        results["images/vae_train"] = wandb.Image(results["images/vae_train"])
+        results["images/vae_test"] = wandb.Image(results["images/vae_test"])
+        wandb.log(results, step=0)
+
+        tqdm.write(f"Epoch {0:4}/{args.epochs} | \
+            loss/vae_test {results['loss/vae_test']} | \
+            loss/lin_probe_train {results['loss/lin_probe_train']} | \
+            loss/lin_probe_test {results['loss/lin_probe_test']} | \
+            accuracy/lin_probe_test {results['accuracy/lin_probe_test']:.3f}±{results['accuracy_lin_probe_test_conf']:.3f}")
 
     scaler = torch.cuda.amp.GradScaler()
     log_iter = int(args.epochs * args.ipe / 10000)
-    cur_step = (last_epoch + 1) * args.ipe
+    cur_step = 0 if last_epoch == -1 else (last_epoch + 1) * args.ipe
     for epoch in tqdm(range(args.epochs),
         desc="TRAINING: Epochs",
         dynamic_ncols=True,
@@ -393,7 +401,7 @@ if __name__ == "__main__":
             leave=False):
 
             with torch.cuda.amp.autocast():
-                loss, _, _ = model(x, z, mask_ratio=args.mask_ratio)
+                loss = model(x, z, mask_ratio=args.mask_ratio)
                 loss = torch.mean(loss)
 
             scaler.scale(loss).backward()
@@ -407,7 +415,7 @@ if __name__ == "__main__":
                 tqdm.write(f"{loss.item()}")
 
             if cur_step % log_iter == 0:
-                wandb.log({"loss/pretrain": loss.item(),
+                wandb.log({"loss/vae_train": loss.item(),
                     "lr": scheduler.get_lr()},
                     step=cur_step)
 
@@ -415,30 +423,29 @@ if __name__ == "__main__":
         # Validate and save a checkpoint
         ########################################################################
         if epoch % args.eval_iter == 0:
-            model = model.cpu()
-            val_model = VariationaViT(parse_v_spec(args), v_mae_model=model)
-            val_model = nn.DataParallel(val_model, device_idxs=args.gpus).to(device)
+            results = validate(model, data_tr, data_fn, data_te, args)
+            if not os.path.exists(f"{save_dir}/images"):
+                os.makedirs(f"{save_dir}/images")
+            results["images/vae_train"].save(f"{save_dir}/images/{epoch+1}_train.png")
+            results["images/vae_test"].save(f"{save_dir}/images/{epoch+1}_test.png")
+            results["images/vae_train"] = wandb.Image(results["images/vae_train"])
+            results["images/vae_test"] = wandb.Image(results["images/vae_test"])
 
-            val_results = linear_probe_one_aug(val_model,
-                data_fn=data_fn,
-                data_te=data_te,
-                latent_spec={"latents": latent_spec["latents"]},
-                args=args)
-
-            data_to_log = val_results | {"loss/pretrain": loss.item(),
+            data_to_log = results | {"loss/vae_train": loss.item(),
                 "lr": scheduler.get_lr()}
+
             tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | \
                 lr {scheduler.get_lr():.5f} | \
-                loss/pretrain {data_to_log['loss/pretrain']} | \
-                loss/fn {data_to_log['loss_eval/finetune']} | \
-                loss/te {data_to_log['loss_eval/test']} | \
-                acc/te {data_to_log['accuracy/test']:.3f}±{data_to_log['accuracy_conf']:.3f}")
+                loss/vae_train {data_to_log['loss/vae_train']} | \
+                loss/lin_probe_train {data_to_log['loss/lin_probe_train']} | \
+                loss/lin_probe_test {data_to_log['loss/lin_probe_test']} | \
+                accuracy/lin_probe_test {data_to_log['accuracy/lin_probe_test']:.3f}±{data_to_log['accuracy_lin_probe_test_conf']:.3f}")
         else:
             data_to_log = {"loss/pretrain": loss.item(),
                 "lr": scheduler.get_lr()}
             tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | \
                 lr {scheduler.get_lr():.5f} | \
-                loss/pretrain {data_to_log['loss/pretrain']}")
+                loss/vae_train {data_to_log['loss/vae_train']}")
 
         wandb.log(data_to_log, step=cur_step)
         torch.save({"model": model.cpu(), "optimizer": optimizer,
