@@ -15,6 +15,10 @@ from ffcv.fields.decoders import IntDecoder, RandomResizedCropRGBImageDecoder, C
 
 from Utils import *
 
+def data_path_to_data_name(data_path):
+    if "imagenet" in data_path.lower():
+        return "imagenet"
+
 def data_str_to_num_classes(data_str):
     """
     """
