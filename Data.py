@@ -9,10 +9,6 @@ from torchvision import transforms
 
 from original_code.util.misc import get_rank, get_world_size
 
-from ffcv.loader import Loader, OrderOption
-from ffcv.transforms import ToTensor, ToDevice, ToTorchImage, RandomHorizontalFlip, NormalizeImage, ModuleWrapper, Convert, Squeeze
-from ffcv.fields.decoders import IntDecoder, RandomResizedCropRGBImageDecoder, CenterCropRGBImageDecoder
-
 from Utils import *
 
 def data_path_to_data_name(data_path):
@@ -80,20 +76,16 @@ def data_path_to_loader(data_path, transform, distributed=False,
 
     The remaining keyword arguments are identical to those for a DataLoader.
     """
-    if data_path.endswith(".beton"):
-        label_pipeline = [IntDecoder(), ToTensor(), Squeeze(), ToDevice(get_rank())]
-        order = OrderOption.RANDOM if shuffle else OrderOption.SEQUENTIAL
-        return Loader(data_path,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            order=order,
-            pipelines={"image": transform, "label": label_pipeline},
-            distributed=distributed,
-            os_cache=True)
-
-    elif is_image_folder(data_path) or data_path.endswith(".lmdb"):
+    if (is_image_folder(data_path)
+        or data_path.endswith(".lmdb")
+        or data_path.endswith(".tar")):
         if data_path.endswith(".lmdb"):
             dataset = LMDBImageFolder(data_path, transform=transform)
+        elif data_path.endswith(".tar"):
+            root_in_archive = os.path.splitext(os.path.basename(data_path))[0]
+            dataset = TarImageFolder(data_path,
+                transform=transform,
+                root_in_archive=root_in_archive)
         else:
             dataset = ImageFolder(data_path, transform=transform)
 

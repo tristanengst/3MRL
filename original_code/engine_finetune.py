@@ -46,8 +46,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
-        # samples = samples.to(device, non_blocking=True)
-        # targets = targets.to(device, non_blocking=True)
+        samples = samples.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
 
         # if mixup_fn is not None:
         #     samples, targets = mixup_fn(samples, targets)
@@ -108,8 +108,8 @@ def evaluate(data_loader, model, device):
     for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0]
         target = batch[-1]
-        # images = images.to(device, non_blocking=True)
-        # target = target.to(device, non_blocking=True)
+        images = images.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
 
         # compute output
         with torch.cuda.amp.autocast():
