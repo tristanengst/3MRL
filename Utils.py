@@ -1,6 +1,6 @@
 import argparse
 import io
-from PIL import Image
+# from PIL import Image
 import matplotlib
 from ApexUtils import *
 from torchvision.transforms import functional as tv_functional
@@ -110,4 +110,3 @@ def show_image_grid(images):
             axs[i, j].imshow(np.asarray(functional_TF.to_pil_image(image.detach())), cmap='Greys_r')
             axs[i, j].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
     plt.show()
-
