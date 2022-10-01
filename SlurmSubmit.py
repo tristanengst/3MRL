@@ -17,6 +17,22 @@ import os
 import random
 from Utils import *
 
+def get_file_move_command(args):
+    """Returns a (file_move_command, args) tuple, where [file_move_command] can
+    be run to move files onto the compute node, and [args] is [args] but
+    modified to use the local files.
+    """
+    key2file = {k: v for k,v in vars(args).items() if k.startswith("data_")}
+    key2file_new = {k: f.replace(os.path.dirname(os.path.dirname(f)), "")
+        for k,f in key2file.items()}
+    s = "\n".join([f"rsync -rav --info=progress2 {f} $SLURM_TMPDIR/{n}"
+        for o,n in zip(key2file.values(), key2file_new.values())])
+
+    key2file_new = {k: f"$SLURM_TMPDIR/{f}" for k,f in key2file_new.items()}
+    args = argparse.Namespace(**(vars(args) | key2file_new))
+    return s, args
+
+
 def get_time(hours):
     """Returns [hours] in SLURM string form.
     Args:
@@ -92,7 +108,10 @@ if __name__ == "__main__":
         TIME = get_time(submission_args.time)
         NAME = get_linear_probe_folder(args).replace(f"{project_dir}/models/", "").replace("/", "_")
 
-        SCRIPT = f"{launch_command} {submission_args.script} {' '.join(unparsed_script_args)}"
+        file_move_command, args = get_file_move_command(args)
+        unparsed_script_args = " ".join(f"--{k} {v}" for k,v in vars(args))
+
+        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {unparsed_script_args}"
 
         with open("slurm/slurm_template_sequential.txt", "r") as f:
             slurm_template = f.read()
