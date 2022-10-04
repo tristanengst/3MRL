@@ -23,10 +23,10 @@ def get_file_move_command(args):
     modified to use the local files.
     """
     key2file = {k: v for k,v in vars(args).items() if k.startswith("data_")}
-    key2file_new = {k: f.replace(os.path.dirname(os.path.dirname(f)), "")
+    key2file_new = {k: f.replace(os.path.dirname(os.path.dirname(f)), "").lstrip("/")
         for k,f in key2file.items()}
-    s = "\n".join([f"rsync -rav --info=progress2 {f} $SLURM_TMPDIR/{n}"
-        for o,n in zip(key2file.values(), key2file_new.values())])
+    s = "\n".join([f"mkdir $SLURM_TMPDIR/{os.path.dirname(n)}\ncp {f} $SLURM_TMPDIR/{n}"
+        for f,n in zip(key2file.values(), key2file_new.values())])
 
     key2file_new = {k: f"$SLURM_TMPDIR/{f}" for k,f in key2file_new.items()}
     args = argparse.Namespace(**(vars(args) | key2file_new))
@@ -67,7 +67,7 @@ if __name__ == "__main__":
         help="Number of GPUs")
     P.add_argument("--use_torch_distributed", type=int, choices=[0, 1], default=1,
         help="Number of GPUs")
-    submission_args, unparsed_script_args = P.parse_known_args()
+    submission_args, unparsed_args = P.parse_known_args()
 
 
     ############################################################################
@@ -80,10 +80,10 @@ if __name__ == "__main__":
         PYTHON_ENV_STR = "module load python/3.9\nvirtualenv $SLURM_TMPDIR/env\nsource $SLURM_TMPDIR/env/bin/activate\npip install --no-index --upgrade pip\npip install --no-index -r requirements.txt"
 
         # This is much cleaner
-        PYTHON_ENV_STR = "module load python/3.9\nsource ~/py39ISICLE/bin/activate"
+        PYTHON_ENV_STR = "module load python/3.9\nsource ~/py310URSA/bin/activate"
         GPU_TYPE = "v100l"
     elif submission_args.cluster == "narval":
-        PYTHON_ENV_STR = "conda activate py3103MRD"
+        PYTHON_ENV_STR = "conda activate py310URSA"
         GPU_TYPE = "a100"
     else:
         raise ValueError(f"Unknown cluster {submission_args.cluster}")
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     if submission_args.script.endswith("LinearProbe.py"):
         assert submission_args.parallel == 1
         from LinearProbe import get_args, get_linear_probe_folder
-        args = get_args(unparsed_script_args)
+        args = get_args(unparsed_args)
 
         START_CHUNK = "0"
         END_CHUNK = "0" #str(args.epochs - 1)
@@ -109,9 +109,15 @@ if __name__ == "__main__":
         NAME = get_linear_probe_folder(args).replace(f"{project_dir}/models/", "").replace("/", "_")
 
         file_move_command, args = get_file_move_command(args)
-        unparsed_script_args = " ".join(f"--{k} {v}" for k,v in vars(args))
 
-        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {unparsed_script_args}"
+        unparsed_args_no_flag = [u.replace("--", "") for u in unparsed_args]
+        
+        unparsed_args = [f"--{k} {v}" for k,v in vars(args).items()
+            if k in unparsed_args_no_flag]
+        unparsed_args += [f"--world_size {submission_args.nproc_per_node}"]
+        unparsed_args = " ".join(unparsed_args)
+
+        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {unparsed_args}"
 
         with open("slurm/slurm_template_sequential.txt", "r") as f:
             slurm_template = f.read()
@@ -133,6 +139,6 @@ if __name__ == "__main__":
     with open(slurm_script, "w+") as f:
         f.write(slurm_template)
 
-    tqdm.write(f"Running\t{SCRIPT}")
+    tqdm.write(f"Script:\n{SCRIPT}")
     tqdm.write(f"SLURM submission script written to {slurm_script}")
     os.system(f"sbatch {slurm_script}")
