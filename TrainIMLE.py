@@ -302,7 +302,7 @@ if __name__ == "__main__":
         raise NotImplementedError()
 
     save_dir = model_folder(args)
-    data_tr = data_path_to_dataset(args.data_val, # Much faster for debugging
+    data_tr = data_path_to_dataset(args.data_tr,
         transform=get_train_transforms(args))
     data_val = data_path_to_dataset(args.data_val,
         transform=get_train_transforms(args))
