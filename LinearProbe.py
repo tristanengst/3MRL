@@ -63,8 +63,6 @@ def get_args(args=None):
         help="checkpoint to finetune from")
     P.add_argument("--global_pool", type=int, default=0, choices=[0, 1],
         help="Whether to use global pooling in forming representations")
-    P.add_argument("--resume", default="",
-        help="...")
 
     # Training parameters
     P.add_argument("--batch_size", default=512, type=int,
@@ -120,8 +118,9 @@ def get_args(args=None):
 def main(args):
     misc.init_distributed_mode(args)
 
-    tqdm.write(f"job dir: {os.path.dirname(os.path.realpath(__file__))}")
-    tqdm.write(f"Args:\n{args}")
+    if misc.is_main_process():
+        tqdm.write(f"job dir: {os.path.dirname(os.path.realpath(__file__))}")
+        tqdm.write(f"Args:\n{args}")
 
     device = torch.device(args.device)
 
@@ -131,8 +130,7 @@ def main(args):
     np.random.seed(seed)
     cudnn.benchmark = True
 
-    # Get our DataLoaders. This is done in a way that's agnostic to the format
-    # the data is stored in.
+    # Get our DataLoaders.
     data_loader_train = data_path_to_loader(args.data_tr,
         transform=get_train_transforms(args.data_tr, args.input_size),
         distributed=args.distributed,
@@ -156,10 +154,21 @@ def main(args):
     else:
         log_writer = None
 
-    model = original_code.models_vit.__dict__[args.model](
-        num_classes=data_str_to_num_classes(args.data_tr),
-        global_pool=args.global_pool,
-    )
+    ############################################################################
+    # Instantiate the model
+    ############################################################################
+    if "mae_checkpoints" in args.finetune:
+        model = original_code.models_vit.__dict__[args.model](
+            num_classes=data_str_to_num_classes(args.data_tr),
+            global_pool=args.global_pool)
+    elif os.path.exists(args.finetune):
+        checkpoint = torch.load(args.finetune, map_location="cpu")
+        model = VariationalViT(encoder_kwargs=checkpoint["encoder_kwargs"],
+            idx2v_method=checkpoint["idx2v_method"],
+            num_classes=data_str_to_num_classes(args.data_tr),
+            global_pool=args.global_pool)
+    else:
+        raise NotImplementedError()
 
     if args.finetune and not args.eval:
         checkpoint = torch.load(args.finetune, map_location="cpu")
@@ -172,11 +181,9 @@ def main(args):
                 tqdm.write(f"Removing key {k} from pretrained checkpoint")
                 del checkpoint_model[k]
 
-        # interpolate position embedding
         interpolate_pos_embed(model, checkpoint_model)
-
-        # load pre-trained model
         msg = model.load_state_dict(checkpoint_model, strict=False)
+        trunc_normal_(model.head.weight, std=0.01)
         tqdm.write(f"{msg}")
 
         if args.global_pool:
@@ -184,13 +191,9 @@ def main(args):
         else:
             assert set(msg.missing_keys) == {"head.weight", "head.bias"}
 
-        # manually initialize fc layer: following MoCo v3
-        trunc_normal_(model.head.weight, std=0.01)
-
-    # for linear prob only
-    # hack: revise model"s head with BN
-    model.head = torch.nn.Sequential(torch.nn.BatchNorm1d(model.head.in_features, affine=False, eps=1e-6), model.head)
-    # freeze all but the head
+    model.head = torch.nn.Sequential(
+        torch.nn.BatchNorm1d(model.head.in_features, affine=False, eps=1e-6),
+        model.head)
     for _, p in model.named_parameters():
         p.requires_grad = False
     for _, p in model.head.named_parameters():
@@ -198,11 +201,21 @@ def main(args):
 
     model.to(device)
 
+    # If the model is a VariationalViT, set its latent specification. We can
+    # then pretend it doesn't exist in subsequent training, so it's fully
+    # compatible with existing training code.
+    if isinstance(model, VariationalViT):
+        model.set_latent_spec(mask_ratio=0,
+            test_input=torch.ones(4, 3, args.input_size, args. input_size))
+
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # tqdm.write("Model = %s" % str(model_without_ddp))
     tqdm.write("number of params (M): %.2f" % (n_parameters / 1.e6))
+
+
+
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
 
@@ -214,6 +227,8 @@ def main(args):
 
     tqdm.write("accumulate grad iterations: %d" % args.accum_iter)
     tqdm.write("effective batch size: %d" % eff_batch_size)
+
+
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])

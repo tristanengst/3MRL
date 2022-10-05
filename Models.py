@@ -3,7 +3,6 @@
 NOTES:
 1. Pretrained models are available at https://github.com/facebookresearch/mae/issues/8, which isn't the same as those directly linked in the repo.
 """
-
 from functools import partial
 
 import torch
@@ -245,9 +244,8 @@ class MaskedAutoencoderViT(nn.Module):
         latent, mask, ids_restore = self.forward_encoder(x, mask_ratio)
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
         loss = self.forward_loss(x, pred, mask, reduction=reduction)
-        pred = de_normalize(self.unpatchify(pred))
-        mask = mask.unsqueeze(-1).repeat(1, 1, self.patch_embed.patch_size[0]**2 *3)
-        mask = self.unpatchify(mask)
+        pred, mask = restore_model_outputs(pred, mask, self.patch_embed,
+            self.unpatchify)
         return loss, pred, mask
 
 def extend_idx2v_method(idx2v_method, length):
@@ -276,7 +274,7 @@ class VariationalBlock(nn.Module):
         self.block = block
         self.v_method = v_method
 
-    def get_latent_spec(self, test_input=torch.ones(4, 3, 224, 224, device=device)):
+    def get_latent_spec(self, test_input=torch.ones(4, 3, 224, 224, device="cuda")):
         """Returns the latent shape minus the batch dimension for the network.
 
         Args:
@@ -301,7 +299,6 @@ class VariationalBlock(nn.Module):
         """
         fx = self.block(x)
         z = z() if isinstance(z, nn.Module) else z
-
         if self.v_method == "add":
             fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
             return fx + z
@@ -314,6 +311,11 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
     """ViT, but with the ability to add Gaussian noise at some place in the
     forward pass.
 
+    To construct from a MaskedVAEViT model [m]:
+    v = VariationalViT(idx2v_method=m.idx2v_method,
+        encoder_kwargs=m.encoder_kwargs, ...)
+    v.load_state_dict(m.state_dict())
+
     Args:
     idx2v_method    -- mapping from from indices to the blocks to whether and
                         how they should be variational. If the ith value in the
@@ -323,17 +325,18 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
 
                         All missing key-value pairs will be added with the value
                         set to False.
-    v_mae_model     -- MaskedViTVAE model instance. Its encoders weights and way
-                        of being variational will be used
+    encoder_kwargs  -- encoder_kwargs of a MaskedVariationalAutoencoder model.
+                        overrides [kwargs] on conflicting entries.
+    global_pool     -- use global pooling or cls token for representations
+    num_classes     -- number of classes for classification
     kwargs          -- arguments for constructing the ViT architecture
     """
-    def __init__(self, idx2v_method={}, v_mae_model=None, global_pool=False,
+    def __init__(self, idx2v_method={}, encoder_kwargs=None, global_pool=False,
         num_classes=1000, **kwargs):
 
         # The architecture [v_mae_model] overrides that in [kwargs] if possible
         kwargs = kwargs | {"num_classes": num_classes}
-        if not v_mae_model is None:
-            kwargs |= de_dataparallel(v_mae_model).encoder_kwargs
+        kwargs = kwargs if encoder_kwargs is None else kwargs | encoder_kwargs
         super(VariationalViT, self).__init__(**kwargs)
 
         self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
@@ -356,16 +359,46 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
 
         if v_mae_model is None:
             self.load_state_dict(v_mae_model.state_dict())
-        
-        self.latent_spec = None
 
-    def get_latent_spec(self, test_input=torch.ones(4, 3, 224, 224, device=device), mask_ratio=0):
-        """Returns the latent shape minus the batch dimension for the network.
+        self.latent_spec = None
+        self.latent_spec_test_input_dims = None
+        self.latent_spec_mask_ratio = None
+
+    def set_latent_spec(self, test_input=None, input_size=None, mask_ratio=0):
+        """Sets the three instance variables storing the latent spec. Requires
+        that the model is on the "cuda" device.
 
         Args:
         test_input  -- a BSxCxHxW tensor to be used as the test input
-        mask_ratio  -- mask ratio. Ignored.
+        input_size  -- spatial resolution of a tensor to be used in place of
+                        [test_input] if [test_input] is None
+        mask_ratio  -- mask ratio
         """
+        if (mask_ratio == self.latent_spec_mask_ratio
+            and test_input.shape == self.latent_spec_test_input_dims
+            and not self.latent_spec is None):
+            return None
+        else:
+            self.latent_spec = self.get_latent_spec(test_input=test_input,
+                input_size=input_size,
+                mask_ratio=mask_ratio)
+            self.latent_spec_test_input_dims = test_input.shape
+            self.latent_spec_mask_ratio = mask_ratio
+            return None
+
+    def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
+        """Returns the latent specification for the network. Requires that the
+        model is on the "cuda" device.
+
+        Args:
+        test_input  -- a BSxCxHxW tensor to be used as the test input
+        input_size  -- spatial resolution of a tensor to be used in place of
+                        [test_input] if [test_input] is None
+        mask_ratio  -- mask ratio
+        """
+        if not input_size is None and test_input is None:
+            test_input = torch.ones(4, 3, input_size, input_size, device="cuda")
+
         shapes = []
         with torch.no_grad():
             B = test_input.shape[0]
@@ -379,19 +412,17 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
             for idx,block in self.idx2block.items():
                 if int(idx) in self.block_idx2z_idx:
                     s = block.get_latent_spec(test_input=x)
+                    x = block(x, torch.ones(len(x), *s, device="cuda"))
                     shapes.append(s)
-                    x = block(x, torch.ones(len(x), *s, device=device))
                 else:
                     x = block(x)
 
         if len(set(shapes)) == 0:
-            self.latent_spec = {"latents": None}
+            return {"latents": None}
         elif len(set(shapes)) == 1:
-            self.latent_spec = {"latents": (len(shapes),) + shapes[0]}
+            return {"latents": (len(shapes),) + shapes[0]}
         else:
-            raise ValueError(f"Got multiple shapes for latent codes: {shapes}")
-        
-        return self.latent_spec
+            raise ValueError(f"Got multiple shapes for latent codes {shapes}")
 
     def forward_features(self, x, ze):
         """Returns representations for [x].
@@ -408,8 +439,6 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        # The only change from a normal ViT architecture. When we encounter a
-        # VariationalBlock, it gets to have its noise fed to it too.
         for idx,block in self.idx2block.items():
             if int(idx) in self.block_idx2z_idx:
                 x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]])
@@ -418,27 +447,27 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
 
         if self.global_pool:
             x = x[:, 1:, :].mean(dim=1)  # global pool without cls token
-            outcome = self.fc_norm(x)
+            return self.fc_norm(x)
         else:
             x = self.norm(x)
-            outcome = x[:, 0]
-
-        return outcome
+            return x[:, 0]
 
     def forward(self, x, z=None, noise="gaussian", z_per_ex=1):
-        if z is None and self.latent_spec is None:
-            latent_spec = self.get_latent_spec()
-        elif z is None and not self.latent_spec is None:
-            latent_spec = self.latent_spec
-        else:
-            pass
+        """Forward function for getting class predictions.
 
+        Requires that set_latent_spec() has been called on the model.
+
+        Args:
+        x       -- BSxCxHxW tensor of images
+        z       -- filled-in latent specification of size matching tha tof [x]
+        noise   -- method for generating [z] if it is None
+        z_per_x -- number of latents for example if [z] is None
+        """
         if z is None:
-            z = sample_latent_dict(latent_spec, bs=len(x) * z_per_ex, noise=noise)
-
-        fx = self.forward_features(x, z)
-        fx = self.forward_head(fx)
-        return fx
+            z = sample_latent_dict(self.latent_spec,
+                bs=len(x) * z_per_ex,
+                noise=noise)
+        return self.forward_head(self.forward_features(x, z))
 
 class MaskedVAEViT(MaskedAutoencoderViT):
     """Masked VAE with VisionTransformer backbone.
@@ -482,17 +511,21 @@ class MaskedVAEViT(MaskedAutoencoderViT):
             for z_idx,b_idx in enumerate([
                 b_idx for b_idx,vm in self.idx2v_method.items() if vm])}
 
-        tqdm.write(f"LOG: Constructed MaskedViTVAE model | num_blocks {len(self.idx2block)} | latent to block mapping {self.block_idx2z_idx} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
+        tqdm.write(f"LOG: Constructed MaskedViTVAE model | num_blocks {len(self.idx2block)} | block to latent mapping {self.block_idx2z_idx} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
 
-    def get_latent_spec(self, test_input=torch.ones(4, 3, 224, 224, device=device),
-        mask_ratio=.75):
-        """Returns the latent shape minus the batch dimension for the network.
-        Concretely, this is a list of tuples. Th
+    def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
+        """Returns the latent specification for the network. Requires that the
+        model is on the "cuda" device.
 
         Args:
         test_input  -- a BSxCxHxW tensor to be used as the test input
+        input_size  -- spatial resolution of a tensor to be used in place of
+                        [test_input] if [test_input] is None
         mask_ratio  -- mask ratio
         """
+        if not input_size is None and test_input is None:
+            test_input = torch.ones(4, 3, input_size, input_size, device="cuda")
+
         shapes = []
         with torch.no_grad():
             x = self.patch_embed(test_input)
@@ -510,18 +543,20 @@ class MaskedVAEViT(MaskedAutoencoderViT):
                 if int(idx) in self.block_idx2z_idx:
                     s = block.get_latent_spec(test_input=x)
                     shapes.append(s)
-                    x = block(x, torch.ones(len(x), *s, device=device))
+                    x = block(x, torch.zeros(len(x), *s, device="cuda"))
                 else:
                     x = block(x)
 
         if len(set(shapes)) == 0:
             return {"mask_noise": mask_noise_shape,
+                "mask_noise_type": "gaussian",
                 "latents": None}
         elif len(set(shapes)) == 1:
             return {"mask_noise": mask_noise_shape,
+                "mask_noise_type": "gaussian",
                 "latents": (len(shapes),) + shapes[0]}
         else:
-            raise ValueError(f"Got multiple shapes for latent codes: {shapes}")
+            raise ValueError(f"Got multiple shapes for latent codes {shapes}")
 
     def forward_encoder(self, x, z, mask_ratio):
         """Forward function for the encoder.
@@ -535,18 +570,15 @@ class MaskedVAEViT(MaskedAutoencoderViT):
         """
         x = self.patch_embed(x)
         x = x + self.pos_embed[:, 1:, :]
-        x, mask, ids_restore = self.random_masking(x, mask_ratio,
-            mask_noise=z["mask_noise"])
+        x, mask, ids_restore = self.random_masking(x, mask_ratio, mask_noise=z["mask_noise"])
+
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
-        # The only change from a normal ViT architecture. When we encounter a
-        # VariationalBlock, it gets to have its noise fed to it too.
         for idx,block in self.idx2block.items():
             if int(idx) in self.block_idx2z_idx:
                 x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]])
-                assert 0
             else:
                 x = block(x)
 
@@ -563,20 +595,34 @@ class MaskedVAEViT(MaskedAutoencoderViT):
                         dimensions given by get_latent_spec().
         mask_ratio  -- mask ratio
         reduction   -- reduction applied to returned loss
-        return_all  -- whether to return a (loss, images, masks) tuple or just loss
+        return_all  -- whether to return a (loss, images, masks) tuple or loss
         """
         if return_all:
             latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio)
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
             loss = self.forward_loss(x, pred, mask, reduction=reduction)
-            pred = de_normalize(self.unpatchify(pred))
-            mask = mask.unsqueeze(-1).repeat(1, 1, self.patch_embed.patch_size[0]**2 *3)
-            mask = self.unpatchify(mask)
+            pred, mask = restore_model_outputs(pred, mask, self.patch_embed,
+                self.unpatchify)
             return loss, pred, mask
         else:
             latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio)
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
             return self.forward_loss(x, pred, mask, reduction=reduction)
+
+def restore_model_outputs(pred, mask, patch_embed, unpatchify):
+    """Returns a (pred, mask) tuple after modifying each to be viewable.
+
+    Args:
+    pred        -- the prediction
+    mask        -- the mask used to create [pred]
+    patch_embed -- patch_embed attribute of the model outputting pred
+    unpatchify  -- unpatchify function of the model outputting pred
+    """
+    pred = de_normalize(unpatchify(pred))
+    mask = mask.unsqueeze(-1).repeat(1, 1, patch_embed.patch_size[0]**2 *3)
+    mask = unpatchify(mask)
+    return pred, mask
+
 
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):
@@ -602,6 +648,11 @@ def mae_vit_huge_patch14_dec512d8b(**kwargs):
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
+def arch_to_model(args):
+    """
+    """
+    if args.arch == "base_patch16":
+        return mae_vit_base_patch16
 
 # set recommended archs
 mae_vit_base_patch16 = mae_vit_base_patch16_dec512d8b  # decoder: 512 dim, 8 blocks

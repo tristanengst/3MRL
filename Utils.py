@@ -24,9 +24,9 @@ def parse_variational_spec(args):
     such blocks need not be specified in the returned dictionary.
     """
     def parse_v_spec_helper(s):
-        if s in ["add"] or not s:
+        if s in ["add", "zero"] or not s:
             return s
-        elif s.starswith("downsample_mlp_"):
+        elif s.startswith("downsample_mlp_"):
             hidden_dim = int(s[len("downsample_mlp_"):])
             raise NotImplementedError()
         else:
@@ -36,38 +36,31 @@ def parse_variational_spec(args):
     val_args = [v for idx,v in enumerate(args.v_spec) if idx % 2 == 1]
     return {k: parse_v_spec_helper(v) for k,v in zip(key_args, val_args)}
 
-def sample_latent_dict(d, bs, device=device, noise="gaussian", key=None):
+def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
     """Returns dictionary [d] after mapping all its values that are tuples of
     integers to Gaussian noise tensors with shapes given by the tuples.
 
     Args:
-    d       -- a mapping from strings to tuples giving the shapes of noise
-                tensors to create
-    bs      -- integer giving the batch size (appended zero dimension) for all
-                returned tensors, or a mapping from keys in [d] to the required
-                batch sizes
-    device  -- the device to return tensors on
-    noise   -- the kind of noise to add
-    key     -- the key associated with a value in [d]. Used recursively only
+    d       -- a mapping from strings to dimensions
+    bs      -- the batch size to use for each tensor
+    device  -- the device to return all tensors on
+    noise   -- the type of noise if for key [k] if 'k_noise_type' isn't in [d]
     """
-    if isinstance(d, tuple):
-        bs = bs[key] if isinstance(bs, dict) and key in bs else bs
-        s = (bs,) + d
-        if noise == "gaussian":
-            return torch.randn(*s, device=device)
-        elif noise == "ones":
-            return torch.ones(*s, device=device)
-        elif noise == "zeros":
-            return torch.zeros(*s, device=device)
+    def get_sample(key, dims):
+        noise_ = d[f"{key}_noise_type"] if f"{key}_noise_type" in d else noise
+        bs_ = d[f"{key}_bs"] if f"{key}_bs" in d else bs
+
+        if noise_ == "gaussian":
+            return torch.randn(*((bs_,) + dims), device=device)
+        elif noise_ == "ones":
+            return torch.ones(*((bs_,) + dims), device=device)
+        elif noise_ == "zeros":
+            return torch.zeros(*((bs_,) + dims), device=device)
         else:
             raise NotImplementedError()
-    elif d is None:
-        return None
-    elif isinstance(d, dict):
-        return {k: sample_latent_dict(v, bs, noise=noise, key=k)
-            for k,v in d.items()}
-    else:
-        raise NotImplementedError()
+    
+    return {k: get_sample(k, v) for k,v in d.items()
+        if not k.endswith("_noise_type") and not k.endswith("_bs")}
 
 def namespace_with_update(args, key, value):
     """Returns a Namespace identical to [args] but with [key] set to [value]."""
@@ -83,12 +76,13 @@ def images_to_pil_image(images):
 
     for i,images_row in enumerate(images):
         for j,image in enumerate(images_row):
-            image = np.asarray(tv_functional.to_pil_image(image.detach()))
-            axs[i, j].imshow(image, cmap='Greys_r')
+            image = torch.clip((image * 255), 0, 255).int()
+            image = torch.einsum("chw->hwc", image.detach().cpu())
+            axs[i, j].imshow(np.asarray(image), cmap='Greys_r')
             axs[i, j].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
 
     buf = io.BytesIO()
-    fig.savefig(buf)
+    fig.savefig(buf, dpi=256)
     buf.seek(0)
     plt.close("all")
     return Image.open(buf)
@@ -100,13 +94,12 @@ def show_image_grid(images):
     """
     images = make_2d_list_of_tensor(images)
 
-
     fig, axs = plt.subplots(ncols=max([len(image_row) for image_row in images]),
         nrows=len(images), squeeze=False)
 
-
     for i,images_row in enumerate(images):
         for j,image in enumerate(images_row):
+            print("--------", image.shape)
             axs[i, j].imshow(np.asarray(functional_TF.to_pil_image(image.detach())), cmap='Greys_r')
             axs[i, j].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
     plt.show()

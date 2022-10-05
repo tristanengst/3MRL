@@ -6,8 +6,7 @@
     conda create -n py310URSA python=3.10 -y
     conda activate py310URSA
     conda install pytorch torchvision cudatoolkit=11.6 -c pytorch -c conda-forge -y
-    conda install -c conda-forge tqdm matplotlib gdown wandb -y
-    pip install lmdb
+    pip install tqdm matplotlib gdown wandb lmdb
     pip install git+https://github.com/tristanengst/apex-utils
     pip install git+https://github.com/rwightman/pytorch-image-models
     pip install git+https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup

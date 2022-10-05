@@ -32,34 +32,22 @@ def is_image_folder(f):
                 for f_ in os.listdir(f)]))
     return is_dir(f) and any([has_images(f"{f}/{d}") for d in os.listdir(f)])
 
-def get_available_datasets(data_path=data_dir):
-    """Returns all available datasets. Recursively looks through the folder
-    hierarchy under [data_path], and returns all directories that can be
-    interpreted as ImageFolders and all .beton files, .tar, and .lmdb files.
-
-    Args:
-    data_path   -- root folder to look inside
+def data_path_to_dataset(data_path, transform):
+    """Returns an ImageFolder-like dataset over [data_path] with transform
+    [transform].
     """
-    image_exts = [".png", ".jpeg", ".jpg"]
-    image_collection_exts = [".beton", ".lmdb", ".tar"]
-
-    def is_dir(f):
-        """Returns if [f] is a directory."""
-        try:
-            _ = os.listdir(f)
-            return True
-        except NotADirectoryError as e:
-            return False
-
-    if is_image_folder(data_path):
-       return [data_path]
-    elif is_dir(data_path):
-        return flatten([get_available_datasets(f"{data_path}/{d}")
-            for d in os.listdir(data_path)])
-    elif any([data_path.endswith(ext) for ext in image_collection_exts]):
-        return [data_path]
+    if data_path.endswith(".lmdb"):
+        return LMDBImageFolder(data_path, transform=transform)
+    elif data_path.endswith(".tar"):
+        tqdm.write(f"LOG: Constructing TAR dataset over {data_path}. This can take a bit...")
+        return TarImageFolder(data_path,
+            transform=transform,
+            root_in_archive=os.path.splitext(os.path.basename(data_path))[0])
+    elif is_image_folder(data_path):
+        return ImageFolder(data_path, transform=transform)
     else:
-        return []
+        raise NotImplementedError(f"Could not match data_path {data_path}")
+
 
 def data_path_to_loader(data_path, transform, distributed=False,
     shuffle=False, batch_size=1, pin_memory=False, num_workers=8, drop_last=False):
@@ -76,39 +64,23 @@ def data_path_to_loader(data_path, transform, distributed=False,
 
     The remaining keyword arguments are identical to those for a DataLoader.
     """
-    if (is_image_folder(data_path)
-        or data_path.endswith(".lmdb")
-        or data_path.endswith(".tar")):
-        if data_path.endswith(".lmdb"):
-            dataset = LMDBImageFolder(data_path, transform=transform)
-        elif data_path.endswith(".tar"):
-            root_in_archive = os.path.splitext(os.path.basename(data_path))[0]
-            dataset = TarImageFolder(data_path,
-                transform=transform,
-                root_in_archive=root_in_archive)
-        else:
-            dataset = ImageFolder(data_path, transform=transform)
-
-        if distributed:
-            sampler = torch.utils.data.DistributedSampler(dataset,
-                num_replicas=get_world_size(),
-                rank=get_rank(),
-                shuffle=shuffle)
-        elif not distributed and shuffle:
-            sampler = torch.utils.data.RandomSampler(dataset)
-        else:
-            sampler = torch.utils.data.SequentialSampler(dataset)
-
-        return DataLoader(dataset,
-            sampler=sampler,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            drop_last=drop_last)
+    dataset = data_path_to_dataset(data_path, transform)
+    if distributed:
+        sampler = torch.utils.data.DistributedSampler(dataset,
+            num_replicas=get_world_size(),
+            rank=get_rank(),
+            shuffle=shuffle)
+    elif not distributed and shuffle:
+        sampler = torch.utils.data.RandomSampler(dataset)
     else:
-        raise NotImplementedError()
+        sampler = torch.utils.data.SequentialSampler(dataset)
 
-
+    return DataLoader(dataset,
+        sampler=sampler,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=drop_last)
 
 class XYDataset(Dataset):
     """A simple dataset returning examples of the form (transform(x), y)."""
