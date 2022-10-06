@@ -17,20 +17,25 @@ import os
 import random
 from Utils import *
 
-def get_file_move_command(args):
-    """Returns a (file_move_command, args) tuple, where [file_move_command] can
+def get_file_move_command(unparsed_args):
+    """Returns a (file_move_command, unparsed_args) tuple, where [file_move_command] can
     be run to move files onto the compute node, and [args] is [args] but
     modified to use the local files.
     """
-    key2file = {k: v for k,v in vars(args).items() if k.startswith("data_")}
-    key2file_new = {k: f.replace(os.path.dirname(os.path.dirname(f)), "").lstrip("/")
-        for k,f in key2file.items()}
-    s = "\n".join([f"mkdir $SLURM_TMPDIR/{os.path.dirname(n)}\ncp {f} $SLURM_TMPDIR/{n}"
-        for f,n in zip(key2file.values(), key2file_new.values())])
+    arg2idx = {a: idx for idx,a in enumerate(unparsed_args)}
+    data_args = {a for a in unparsed_args if a.startswith("--data_")}
 
-    key2file_new = {k: f"$SLURM_TMPDIR/{f}" for k,f in key2file_new.items()}
-    args = argparse.Namespace(**(vars(args) | key2file_new))
-    return s, args
+    source2dest = {}
+    for d in data_args:
+        source = unparsed_args[arg2idx[d] + 1]
+        dest = source.replace(os.path.dirname(os.path.dirname(source)), "")
+        dest = dest.lstrip("/")
+        source2dest[source] = f"$SLURM_TMPDIR/{dest}"
+        unparsed_args[arg2idx[d] + 1] = f"$SLURM_TMPDIR/{dest}"
+
+    s = "\n".join([f"mkdir {os.path.dirname(d)}\ncp {s} {d}"
+        for s,d in source2dest.items()])
+    return s, unparsed_args
 
 
 def get_time(hours):
@@ -65,7 +70,7 @@ if __name__ == "__main__":
         help="Cluster on which the jobs are submitted")
     P.add_argument("--nproc_per_node", type=int, default=4,
         help="Number of GPUs")
-    P.add_argument("--use_torch_distributed", type=int, choices=[0, 1], default=1,
+    P.add_argument("--use_torch_distributed", type=int, choices=[0, 1], default=0,
         help="Number of GPUs")
     submission_args, unparsed_args = P.parse_known_args()
 
@@ -93,12 +98,17 @@ if __name__ == "__main__":
     else:
         launch_command = "python"
 
+    file_move_command = None
     ############################################################################
     # Get script-specific argument settings
     ############################################################################
     if submission_args.script.endswith("LinearProbe.py"):
         assert submission_args.parallel == 1
         from LinearProbe import get_args, get_linear_probe_folder
+
+        unparsed_args += [f"--world_size {submission_args.nproc_per_node}"]
+
+        file_move_command, unparsed_args = get_file_move_command(unparsed_args)
         args = get_args(unparsed_args)
 
         START_CHUNK = "0"
@@ -108,17 +118,25 @@ if __name__ == "__main__":
         TIME = get_time(submission_args.time)
         NAME = get_linear_probe_folder(args).replace(f"{project_dir}/models/", "").replace("/", "_")
 
-        file_move_command, args = get_file_move_command(args)
-
-        unparsed_args_no_flag = [u.replace("--", "") for u in unparsed_args]
-        
-        unparsed_args = [f"--{k} {v}" for k,v in vars(args).items()
-            if k in unparsed_args_no_flag]
-        unparsed_args += [f"--world_size {submission_args.nproc_per_node}"]
-        unparsed_args = " ".join(unparsed_args)
-
         SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {unparsed_args}"
+        with open("slurm/slurm_template_sequential.txt", "r") as f:
+            slurm_template = f.read()
+    elif submission_args.script.endswith("TrainIMLE.py"):
+        from TrainIMLE import model_folder, get_args
 
+        file_move_command, unparsed_args = get_file_move_command(unparsed_args)
+        args = get_args(unparsed_args)
+
+        joined_unparsed_args = " ".join(unparsed_args)
+
+        START_CHUNK = "0"
+        END_CHUNK = "0" #str(args.epochs - 1)
+        PARALLEL = "1"
+        NUM_GPUS = str(len(args.gpus))
+        TIME = get_time(submission_args.time)
+        NAME = model_folder(args).replace(f"{project_dir}/models/", "").replace("/", "_")
+        
+        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {joined_unparsed_args}"
         with open("slurm/slurm_template_sequential.txt", "r") as f:
             slurm_template = f.read()
     else:
@@ -139,6 +157,8 @@ if __name__ == "__main__":
     with open(slurm_script, "w+") as f:
         f.write(slurm_template)
 
+    tqdm.write(f"File move command: {file_move_command}")
+    tqdm.write(f"Launch command: {launch_command}")
     tqdm.write(f"Script:\n{SCRIPT}")
     tqdm.write(f"SLURM submission script written to {slurm_script}")
     os.system(f"sbatch {slurm_script}")
