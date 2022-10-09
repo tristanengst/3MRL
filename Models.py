@@ -274,7 +274,7 @@ class VariationalBlock(nn.Module):
         self.block = block
         self.v_method = v_method
 
-    def get_latent_spec(self, test_input=torch.ones(4, 3, 224, 224, device="cuda")):
+    def get_latent_spec(self, test_input):
         """Returns the latent shape minus the batch dimension for the network.
 
         Args:

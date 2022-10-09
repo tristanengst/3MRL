@@ -21,8 +21,10 @@ from Utils import *
 def model_folder(args):
     """Returns the folder to which to save a model built with [args]."""
     uid = args.uid if args.job_id is None else args.job_id
+
     data = os.path.basename(os.path.dirname(args.data_tr)).strip("/")
-    folder = f"{project_dir}/models/{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-{uid}{suffix_str(args)}"
+    v_spec = "_".join(args.v_spec)
+    folder = f"{project_dir}/models/{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-v_spec{v_spec}-{uid}{suffix_str(args)}"
 
     conditional_safe_make_directory(folder)
     if not os.path.exists(f"{folder}/config.json"):
@@ -193,7 +195,12 @@ def validate(model, data_tr, data_val, latent_spec, args):
         "images/pretrain_test": images_to_pil_image(images_te)}
 
 def get_args(args=None):
-    path_exists_type = lambda x: x if os.path.exists(x) else False
+
+    def path_exists_type(x):
+        if os.path.exists(x) or x.startswith("$SLURM_TMPDIR"):
+            return x
+        else:
+            return False
 
     P = argparse.ArgumentParser()
     P.add_argument("--wandb", choices=["disabled", "online", "offline"], default="online",
@@ -238,7 +245,9 @@ def get_args(args=None):
         help="Per-image latent code parallelism during sampling")
     P.add_argument("--ipe", type=int, default=10240,
         help="Gradient steps per epoch. Always at least the number of steps to see each minibatch once.")
-    P.add_argument("--lr", type=float, default=1e-3,
+    P.add_argument("--lr", type=float, default=1e-4,
+        help="Base learning rate")
+    P.add_argument("--min_lr", type=float, default=2e-5,
         help="Base learning rate")
     P.add_argument("--mask_ratio", type=float, default=.75,
         help="Mask ratio for the model")
@@ -314,7 +323,7 @@ if __name__ == "__main__":
         first_cycle_steps=args.epochs * args.ipe,
         warmup_steps=args.n_ramp * args.ipe,
         max_lr=args.lr,
-        min_lr=args.lr / 100,
+        min_lr=args.min_lr,
         last_epoch=-1 if last_epoch == -1 else last_epoch * args.ipe)
 
     ############################################################################
