@@ -288,7 +288,7 @@ if __name__ == "__main__":
             mae = mae_vit_base_patch16()
         elif args.arch == "large_pretrained":
             mae_model_state = torch.load(f"{project_dir}/mae_checkpoints/mae_pretrain_vit_large_full.pth")["model"]
-            mae = mae_vit_large_patch16_dec512d8b()      
+            mae = mae_vit_large_patch16_dec512d8b()
         else:
             raise NotImplementedError()
 
@@ -308,6 +308,7 @@ if __name__ == "__main__":
         transform=get_train_transforms(args))
     latent_spec = model.module.get_latent_spec(mask_ratio=args.mask_ratio,
         input_size=args.input_size)
+    tqdm.write(f"LOG: Constructed latent shape dictionary: {latent_spec}")
     kkm = KOrKMinusOne(range(len(data_tr)), shuffle=True)
     scheduler = CosineAnnealingWarmupRestarts(optimizer,
         first_cycle_steps=args.epochs * args.ipe,
@@ -346,8 +347,9 @@ if __name__ == "__main__":
             shuffle=True,
             num_workers=args.num_workers,
             pin_memory=True,
-            collate_fn=ImageLatentDataset.collate_fn)
-            
+            collate_fn=ImageLatentDataset.collate_fn,
+            persistent_workers=True)
+
         num_passes_over_loader = max(1, args.ipe // len(loader))
         batch_loader = chain(*[loader] * num_passes_over_loader)
         gradient_steps = num_passes_over_loader * len(loader)

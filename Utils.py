@@ -5,6 +5,9 @@ import matplotlib
 from ApexUtils import *
 from torchvision.transforms import functional as tv_functional
 
+
+torch.backends.cudnn.benchmark = True
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 plt.rcParams["savefig.bbox"] = "tight"
 
@@ -34,6 +37,7 @@ def parse_variational_spec(args):
 
     key_args = [int(k) for idx,k in enumerate(args.v_spec) if idx % 2 == 0]
     val_args = [v for idx,v in enumerate(args.v_spec) if idx % 2 == 1]
+    assert len(key_args) == len(val_args)
     return {k: parse_v_spec_helper(v) for k,v in zip(key_args, val_args)}
 
 def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
@@ -58,7 +62,7 @@ def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
             return torch.zeros(*((bs_,) + dims), device=device)
         else:
             raise NotImplementedError()
-    
+
     return {k: get_sample(k, v) for k,v in d.items()
         if not k.endswith("_noise_type") and not k.endswith("_bs")}
 

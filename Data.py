@@ -39,7 +39,7 @@ def data_path_to_dataset(data_path, transform):
     if data_path.endswith(".lmdb"):
         return LMDBImageFolder(data_path, transform=transform)
     elif data_path.endswith(".tar"):
-        tqdm.write(f"LOG: Constructing TAR dataset over {data_path}. This can take a bit...")
+        tqdm.write(f"LOG: Constructing TAR dataset. This can take a bit...")
         return TarImageFolder(data_path,
             transform=transform,
             root_in_archive=os.path.splitext(os.path.basename(data_path))[0])
