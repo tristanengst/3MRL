@@ -245,7 +245,9 @@ def get_args(args=None):
         help="Per-image latent code parallelism during sampling")
     P.add_argument("--ipe", type=int, default=10240,
         help="Gradient steps per epoch. Always at least the number of steps to see each minibatch once.")
-    P.add_argument("--lr", type=float, default=1e-3,
+    P.add_argument("--lr", type=float, default=1e-4,
+        help="Base learning rate")
+    P.add_argument("--min_lr", type=float, default=2e-5,
         help="Base learning rate")
     P.add_argument("--mask_ratio", type=float, default=.75,
         help="Mask ratio for the model")
@@ -320,7 +322,7 @@ if __name__ == "__main__":
         first_cycle_steps=args.epochs * args.ipe,
         warmup_steps=args.n_ramp * args.ipe,
         max_lr=args.lr,
-        min_lr=args.lr / 100,
+        min_lr=args.min_lr,
         last_epoch=-1 if last_epoch == -1 else last_epoch * args.ipe)
 
     ############################################################################
