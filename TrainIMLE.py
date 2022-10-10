@@ -22,7 +22,7 @@ def model_folder(args, make_folder=True):
     """Returns the folder to which to save a model built with [args]."""
     data = os.path.basename(os.path.dirname(args.data_tr)).strip("/")
     v_spec = "_".join(args.v_spec)
-    folder = f"{project_dir}/models/{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-v_spec{v_spec}-{uid}{suffix_str(args)}"
+    folder = f"{project_dir}/models/{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-v_spec{v_spec}-{args.uid}{suffix_str(args)}"
 
     if make_folder:
         conditional_safe_make_directory(folder)
@@ -180,12 +180,16 @@ def validate(model, data_tr, data_val, latent_spec, args):
 
         return total_loss.item() / (len(dataset)), image_grid
 
+    vae_loss_te, _ = get_reconstruction_images_loss(model,
+        Subset(data_val, indices=random.sample(range(len(data_val)), k=512)),
+        latent_spec, args)
+
     idxs_tr = torch.linspace(0, len(data_tr) - 1, args.num_ex_for_eval_tr)
     idxs_te = torch.linspace(0, len(data_val) - 1, args.num_ex_for_eval_te)
-    vae_loss_tr, images_tr = get_reconstruction_images_loss(model,
+    _, images_tr = get_reconstruction_images_loss(model,
         Subset(data_tr, [int(idx) for idx in idxs_tr.tolist()]),
         latent_spec, args)
-    vae_loss_te, images_te = get_reconstruction_images_loss(model,
+    _, images_te = get_reconstruction_images_loss(model,
         Subset(data_val, [int(idx) for idx in idxs_te.tolist()]),
         latent_spec, args)
 
@@ -226,7 +230,7 @@ def get_args(args=None):
         help="Number of training examples for logging")
     P.add_argument("--num_ex_for_eval_te", default=8,
         help="Number of training examples for logging")
-    P.add_argument("--z_per_ex", default=6, type=int,
+    P.add_argument("--z_per_ex", default=64, type=int,
         help="Number of latents per example for logging")
     P.add_argument("--eval_iter", type=int, default=1,
         help="Number of epochs between validation")
