@@ -109,7 +109,7 @@ if __name__ == "__main__":
         NAME = get_linear_probe_folder(args, make_folder=False)
         NAME = NAME.replace(f"{project_dir}/models/", "").replace("/", "_")
 
-        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {unparsed_args}"
+        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {' '.join(unparsed_args)}"
         
         template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
         with open(template, "r") as f:
@@ -129,7 +129,7 @@ if __name__ == "__main__":
         NAME = model_folder(args, make_folder=False)
         NAME = NAME.replace(f"{project_dir}/models/", "").replace("/", "_")
         
-        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {unparsed_args}"
+        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {' '.join(unparsed_args)}"
         
         template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
         with open(template, "r") as f:
