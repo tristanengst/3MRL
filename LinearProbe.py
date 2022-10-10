@@ -41,9 +41,14 @@ from Models import VariationalViT
 from Utils import *
 
 def get_linear_probe_folder(args, make_folder=True):
-    model = os.path.splitext(os.path.basename(args.finetune))[0]
+    if os.path.basename(args.finetune).startswith("mae"):
+        model = os.path.splitext(os.path.basename(args.finetune))[0]
+    else:
+        model = args.finetune
+        model = f"{os.path.basename(os.path.dirname(model))}/epoch_{os.path.basename(model).replace('.pt', '')}_linear_probe"
+
     data = data_path_to_data_name(args.data_tr)
-    folder = f"{project_dir}/models/{model}/linear_probe/{data}-bs{args.batch_size}"
+    folder = f"{project_dir}/models/{model}/{data}-bs{args.batch_size}"
 
     if make_folder:
         conditional_safe_make_directory(folder)
@@ -97,7 +102,7 @@ def get_args(args=None):
 
     P.add_argument("--output_dir", default=False,
         help="path where to save, empty for no saving")
-    P.add_argument("--log_dir", default=None,
+    P.add_argument("--log_dir", default=None, # Unused because we just care about printed outputs
         help="path where to tensorboard log")
     P.add_argument("--device", default="cuda",
         help="device to use for training / testing")
@@ -120,6 +125,8 @@ def get_args(args=None):
 
 @record
 def main(args):
+    args.output_dir = get_linear_probe_folder(args)
+
     misc.init_distributed_mode(args)
 
     if misc.is_main_process():
@@ -135,7 +142,7 @@ def main(args):
     cudnn.benchmark = True
 
     # Get our DataLoaders.
-    data_loader_train = data_path_to_loader(args.data_tr,
+    loader_tr = data_path_to_loader(args.data_tr,
         transform=get_train_transforms(args),
         distributed=args.distributed,
         batch_size=args.batch_size,
@@ -143,7 +150,7 @@ def main(args):
         pin_memory=False,
         drop_last=True,
         shuffle=True)
-    data_loader_val = data_path_to_loader(args.data_val,
+    loader_val = data_path_to_loader(args.data_val,
         transform=get_test_transforms(args),
         distributed=args.distributed,
         batch_size=args.batch_size,
@@ -213,7 +220,6 @@ def main(args):
             test_input=torch.ones(4, 3, args.input_size, args. input_size,
                 device=device))
 
-
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -246,7 +252,7 @@ def main(args):
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(loader_val, model, device)
         tqdm.write(f"Accuracy of the network on test images: {test_stats['acc1']:.1f}%")
         exit(0)
 
@@ -254,21 +260,21 @@ def main(args):
     start_time = time.time()
     max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed and isinstance(data_loader_train, DataLoader):
-            data_loader_train.sampler.set_epoch(epoch)
+        if args.distributed and isinstance(loader_tr, DataLoader):
+            loader_tr.sampler.set_epoch(epoch)
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train,
+            model, criterion, loader_tr,
             optimizer, device, epoch, loss_scaler,
             max_norm=None,
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir:
+        if args.output_dir and epoch == args.epochs - 1:
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
 
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(loader_val, model, device)
         tqdm.write(f"Accuracy of the network on test images: {test_stats['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         tqdm.write(f"Max accuracy: {max_accuracy:.2f}%")
