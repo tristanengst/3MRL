@@ -32,26 +32,28 @@ import original_code.models_vit
 
 from original_code.engine_finetune import train_one_epoch, evaluate
 
+
+from torch.distributed.elastic.multiprocessing.errors import record
+
 from Augmentation import *
 from Data import *
 from Models import VariationalViT
 from Utils import *
 
-def get_linear_probe_folder(args):
+def get_linear_probe_folder(args, make_folder=True):
     model = os.path.splitext(os.path.basename(args.finetune))[0]
     data = data_path_to_data_name(args.data_tr)
     folder = f"{project_dir}/models/{model}/linear_probe/{data}-bs{args.batch_size}"
 
-    conditional_safe_make_directory(folder)
-    if not os.path.exists(f"{folder}/config.json"):
-        with open(f"{folder}/config.json", "w+") as f:
-            json.dump(vars(args), f)
+    if make_folder:
+        conditional_safe_make_directory(folder)
+        if not os.path.exists(f"{folder}/config.json"):
+            with open(f"{folder}/config.json", "w+") as f:
+                json.dump(vars(args), f)
     return folder
 
 def get_args(args=None):
     """Returns a Namespace giving the parameters to run with."""
-    file_if_exists = lambda f: f if os.path.exists(f) else False
-
     P = argparse.ArgumentParser()
     P.add_argument("--eval", action="store_true",
         help="Perform evaluation only")
@@ -63,6 +65,8 @@ def get_args(args=None):
         help="checkpoint to finetune from")
     P.add_argument("--global_pool", type=int, default=0, choices=[0, 1],
         help="Whether to use global pooling in forming representations")
+    P.add_argument("--noise", choices=["zeros", "gaussian"], default="zeros",
+        help="Noise type. Only variational models can use non-zero noise.")
 
     # Training parameters
     P.add_argument("--batch_size", default=512, type=int,
@@ -84,9 +88,9 @@ def get_args(args=None):
         help="start epoch")
 
     # Dataset parameters
-    P.add_argument("--data_tr", required=True, type=file_if_exists,
+    P.add_argument("--data_tr", required=True, type=argparse_file_type,
         help="Path to training data")
-    P.add_argument("--data_val", required=True, type=file_if_exists,
+    P.add_argument("--data_val", required=True, type=argparse_file_type,
         help="Path to testing (validation) data")
     P.add_argument("--input_size", type=int, default=224,
         help="Resolution at which to feed data to the model")
@@ -101,7 +105,7 @@ def get_args(args=None):
 
     P.add_argument("--dist_eval", type=int, default=1, choices=[0, 1],
         help="Enable distributed evaluation")
-    P.add_argument("--num_workers", default=24, type=int,
+    P.add_argument("--num_workers", default=12, type=int,
         help="Number of workers")
 
     # distributed training parameters
@@ -114,7 +118,7 @@ def get_args(args=None):
     args = P.parse_args() if args is None else P.parse_args(args)
     return args
 
-
+@record
 def main(args):
     misc.init_distributed_mode(args)
 
@@ -132,7 +136,7 @@ def main(args):
 
     # Get our DataLoaders.
     data_loader_train = data_path_to_loader(args.data_tr,
-        transform=get_train_transforms(args.data_tr, args.input_size),
+        transform=get_train_transforms(args),
         distributed=args.distributed,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -140,7 +144,7 @@ def main(args):
         drop_last=True,
         shuffle=True)
     data_loader_val = data_path_to_loader(args.data_val,
-        transform=get_test_transforms(args.data_val, args.input_size),
+        transform=get_test_transforms(args),
         distributed=args.distributed,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -166,7 +170,8 @@ def main(args):
         model = VariationalViT(encoder_kwargs=checkpoint["encoder_kwargs"],
             idx2v_method=checkpoint["idx2v_method"],
             num_classes=data_str_to_num_classes(args.data_tr),
-            global_pool=args.global_pool)
+            global_pool=args.global_pool,
+            noise=args.noise)
     else:
         raise NotImplementedError()
 
@@ -200,22 +205,20 @@ def main(args):
         p.requires_grad = True
 
     model.to(device)
-
     # If the model is a VariationalViT, set its latent specification. We can
     # then pretend it doesn't exist in subsequent training, so it's fully
     # compatible with existing training code.
     if isinstance(model, VariationalViT):
         model.set_latent_spec(mask_ratio=0,
-            test_input=torch.ones(4, 3, args.input_size, args. input_size))
+            test_input=torch.ones(4, 3, args.input_size, args. input_size,
+                device=device))
+
 
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # tqdm.write("Model = %s" % str(model_without_ddp))
     tqdm.write("number of params (M): %.2f" % (n_parameters / 1.e6))
-
-
-
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
 
@@ -227,8 +230,6 @@ def main(args):
 
     tqdm.write("accumulate grad iterations: %d" % args.accum_iter)
     tqdm.write("effective batch size: %d" % eff_batch_size)
-
-
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])

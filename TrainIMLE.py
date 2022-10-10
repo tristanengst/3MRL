@@ -18,18 +18,17 @@ from Data import *
 from Models import *
 from Utils import *
 
-def model_folder(args):
+def model_folder(args, make_folder=True):
     """Returns the folder to which to save a model built with [args]."""
-    uid = args.uid if args.job_id is None else args.job_id
-
     data = os.path.basename(os.path.dirname(args.data_tr)).strip("/")
     v_spec = "_".join(args.v_spec)
     folder = f"{project_dir}/models/{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-v_spec{v_spec}-{uid}{suffix_str(args)}"
 
-    conditional_safe_make_directory(folder)
-    if not os.path.exists(f"{folder}/config.json"):
-        with open(f"{folder}/config.json", "w+") as f:
-            json.dump(vars(args), f)
+    if make_folder:
+        conditional_safe_make_directory(folder)
+        if not os.path.exists(f"{folder}/config.json"):
+            with open(f"{folder}/config.json", "w+") as f:
+                json.dump(vars(args), f)
     return folder
 
 class ImageLatentDataset(Dataset):
@@ -217,9 +216,9 @@ def get_args(args=None):
         help="Whether to finetune an existing MAE model or train from scratch")
 
     # Data arguments
-    P.add_argument("--data_tr", default="data/imagenet/train.tar", type=path_exists_type,
+    P.add_argument("--data_tr", default="data/imagenet/train.tar", type=argparse_file_type,
         help="String specifying training data")
-    P.add_argument("--data_val", default="data/imagenet/val.tar", type=path_exists_type,
+    P.add_argument("--data_val", default="data/imagenet/val.tar", type=argparse_file_type,
         help="String specifying finetuning data")
 
     # Evaluation arguments.
@@ -409,7 +408,7 @@ if __name__ == "__main__":
             tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | lr {scheduler.get_lr()[0]:.5f} | loss/pretrain_train {data_to_log['loss/pretrain_train']}")
 
         wandb.log(data_to_log, step=cur_step)
-        torch.save({"state_dict": de_dataparallel(model).cpu().state_dict(),
+        torch.save({"model": de_dataparallel(model).cpu().state_dict(),
             "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
             "idx2v_method": de_dataparallel(model).idx2v_method,
             "optimizer": optimizer.state_dict(),

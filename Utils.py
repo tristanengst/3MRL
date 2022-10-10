@@ -1,11 +1,11 @@
 import argparse
 import io
-# from PIL import Image
 import matplotlib
 from ApexUtils import *
 from torchvision.transforms import functional as tv_functional
 
-
+# I don't think this does anything because we don't have convolutions, but it
+# probably can't hurt
 torch.backends.cudnn.benchmark = True
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -13,6 +13,15 @@ plt.rcParams["savefig.bbox"] = "tight"
 
 project_dir = f"{os.path.dirname(__file__)}"
 data_dir = f"{project_dir}/data"
+
+def argparse_file_type(f):
+    """Returns [f] if the file exists, else raises an ArgumentType error."""
+    if os.path.exists(f):
+        return f
+    elif f.startswith("$SLURM_TMPDIR"):
+        return f
+    else:
+        raise argparse.ArgumentTypeError(f"Could not find data file {f}")
 
 def de_dataparallel(net):
     """Returns a reference to the network wrapped in a DataParallel object
@@ -44,9 +53,16 @@ def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
     """Returns dictionary [d] after mapping all its values that are tuples of
     integers to Gaussian noise tensors with shapes given by the tuples.
 
+    The noise and batch size specified as function parameters are default.
+    However, they can be overridden on a per-key basis if needed. Example:
+    ```
+    {key: (1701,), key_bs: 42, key_noise_type: "zeros"}
+    ```
+
     Args:
-    d       -- a mapping from strings to dimensions
-    bs      -- the batch size to use for each tensor
+    d       -- a mapping from strings to dimensions, possibly with other
+                key-value pairs
+    bs      -- the batch size to use for each tensor if 'k_bs' isn't in [d]
     device  -- the device to return all tensors on
     noise   -- the type of noise if for key [k] if 'k_noise_type' isn't in [d]
     """
@@ -61,14 +77,10 @@ def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
         elif noise_ == "zeros":
             return torch.zeros(*((bs_,) + dims), device=device)
         else:
-            raise NotImplementedError()
+            raise NotImplementedError(f"Unknown noise '{noise}'")
 
     return {k: get_sample(k, v) for k,v in d.items()
         if not k.endswith("_noise_type") and not k.endswith("_bs")}
-
-def namespace_with_update(args, key, value):
-    """Returns a Namespace identical to [args] but with [key] set to [value]."""
-    return argparse.Namespace(**(vars(args) | {new_param: value}))
 
 def images_to_pil_image(images):
     """Returns tensor datastructure [images] as a PIL image."""
@@ -90,20 +102,3 @@ def images_to_pil_image(images):
     buf.seek(0)
     plt.close("all")
     return Image.open(buf)
-
-def show_image_grid(images):
-    """Shows list of images [images], either a Tensor giving one image, a List
-    where each element is a Tensors giving one images, or a 2D List where each
-    element is a Tensor giving an image.
-    """
-    images = make_2d_list_of_tensor(images)
-
-    fig, axs = plt.subplots(ncols=max([len(image_row) for image_row in images]),
-        nrows=len(images), squeeze=False)
-
-    for i,images_row in enumerate(images):
-        for j,image in enumerate(images_row):
-            print("--------", image.shape)
-            axs[i, j].imshow(np.asarray(functional_TF.to_pil_image(image.detach())), cmap='Greys_r')
-            axs[i, j].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-    plt.show()

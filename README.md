@@ -20,15 +20,15 @@
 ### Running Code
 Finetune a ViT model using IMLE and training it as a VAE. This will save checkpoints including model weights and generate outputs to the `vaes` folder. You can also set `--resume` to `"none"` to train from scratch.
 ```
-python FineTuneIMLEWithIMLE.py --resume vit_base
+python TrainIMLE.py --resume vit_base
 ```
 Run a linear evaluation using the encoder of a saved checkpoint as a frozen feature extractor:
 ```
-foo
+python -m --nproc_per_node NUM_GPUS LinearProbe.py --data_tr DATA_TR --data_val DATA_VAL --finetune PATH/TO/MODEL.pt
 ```
 Finetune the encoder of a saved checkpoint on a classification task:
 ```
-foo
+
 ```
 
 ### Downloadable Checkpoints

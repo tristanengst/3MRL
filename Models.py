@@ -332,7 +332,7 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
     kwargs          -- arguments for constructing the ViT architecture
     """
     def __init__(self, idx2v_method={}, encoder_kwargs=None, global_pool=False,
-        num_classes=1000, **kwargs):
+        num_classes=1000, noise="gaussian", **kwargs):
 
         # The architecture [v_mae_model] overrides that in [kwargs] if possible
         kwargs = kwargs | {"num_classes": num_classes}
@@ -355,14 +355,13 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
             norm_layer = kwargs["norm_layer"]
             embed_dim = kwargs["embed_dim"]
             self.fc_norm = norm_layer(embed_dim)
-            del self.norm
-
-        if v_mae_model is None:
-            self.load_state_dict(v_mae_model.state_dict())
+            del self.norm            
 
         self.latent_spec = None
         self.latent_spec_test_input_dims = None
         self.latent_spec_mask_ratio = None
+
+        self.noise = noise
 
     def set_latent_spec(self, test_input=None, input_size=None, mask_ratio=0):
         """Sets the three instance variables storing the latent spec. Requires
@@ -424,7 +423,7 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
         else:
             raise ValueError(f"Got multiple shapes for latent codes {shapes}")
 
-    def forward_features(self, x, ze):
+    def forward_features(self, x, z):
         """Returns representations for [x].
 
         Args:
@@ -452,7 +451,7 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
             x = self.norm(x)
             return x[:, 0]
 
-    def forward(self, x, z=None, noise="gaussian", z_per_ex=1):
+    def forward(self, x, z=None, noise=None, z_per_ex=1):
         """Forward function for getting class predictions.
 
         Requires that set_latent_spec() has been called on the model.
@@ -466,7 +465,8 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
         if z is None:
             z = sample_latent_dict(self.latent_spec,
                 bs=len(x) * z_per_ex,
-                noise=noise)
+                noise=self.noise if noise is None else noise)
+        
         return self.forward_head(self.forward_features(x, z))
 
 class MaskedVAEViT(MaskedAutoencoderViT):

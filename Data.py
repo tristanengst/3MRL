@@ -16,7 +16,9 @@ def data_path_to_data_name(data_path):
         return "imagenet"
 
 def data_str_to_num_classes(data_str):
-    """
+    """Returns the number of classes in a dataset specified by [data_str].
+
+    Note: this function requires hardcoding and won't work on arbitrary inputs.
     """
     if "imagenet" in data_str.lower():
         return 1000
@@ -25,6 +27,7 @@ def data_str_to_num_classes(data_str):
 
 def is_image_folder(f):
     """Returns if path [f] can be interpreted as an ImageFolder."""
+    image_exts = [".png", ".jpg", ".jpeg"]
     def has_images(f):
         """Returns if [f] contains at least one image."""
         return (is_dir(f)
