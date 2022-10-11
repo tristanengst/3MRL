@@ -48,7 +48,7 @@ def get_linear_probe_folder(args, make_folder=True):
         model = f"{os.path.basename(os.path.dirname(model))}/epoch_{os.path.basename(model).replace('.pt', '')}_linear_probe"
 
     data = data_path_to_data_name(args.data_tr)
-    folder = f"{project_dir}/models/{model}/{data}-bs{args.batch_size}"
+    folder = f"{project_dir}/models/{model}/{data}-bs{args.batch_size}-noise_{args.noise}"
 
     if make_folder:
         conditional_safe_make_directory(folder)
