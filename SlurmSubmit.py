@@ -134,6 +134,26 @@ if __name__ == "__main__":
         template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
         with open(template, "r") as f:
             template = f.read()
+    elif submission_args.script == "TrainIMLE32.py":
+        from TrainIMLE32 import get_args, model_folder
+
+        file_move_command, unparsed_args = get_file_move_command(unparsed_args)
+        args = get_args(unparsed_args)
+
+        unparsed_args += [f"--job_id", "$SLURM_ARRAY_JOB_ID"]
+
+        START_CHUNK = "0"
+        END_CHUNK = "0"
+        PARALLEL = "1"
+        NUM_GPUS = str(len(args.gpus))
+        NAME = model_folder(args, make_folder=False)
+        NAME = NAME.replace(f"{project_dir}/models/", "").replace("/", "_")
+        
+        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {' '.join(unparsed_args)}"
+        
+        template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
+        with open(template, "r") as f:
+            template = f.read()
     else:
         raise ValueError(f"Unknown script '{submission_args.script}")
 
