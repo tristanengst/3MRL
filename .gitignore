@@ -12,6 +12,7 @@
 *.pth
 *__pycache__
 *models
+*models32
 *wandb
 *output_dir
 *data

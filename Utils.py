@@ -67,6 +67,9 @@ def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
     noise   -- the type of noise if for key [k] if 'k_noise_type' isn't in [d]
     """
     def get_sample(key, dims):
+        if dims is None:
+            dims = ()
+            
         noise_ = d[f"{key}_noise_type"] if f"{key}_noise_type" in d else noise
         bs_ = d[f"{key}_bs"] if f"{key}_bs" in d else bs
 
@@ -76,6 +79,8 @@ def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
             return torch.ones(*((bs_,) + dims), device=device)
         elif noise_ == "zeros":
             return torch.zeros(*((bs_,) + dims), device=device)
+        elif noise_ == "uniform":
+            return torch.rand(*((bs_,) + dims), device=device)
         else:
             raise NotImplementedError(f"Unknown noise '{noise}'")
 

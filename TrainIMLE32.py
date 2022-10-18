@@ -20,7 +20,7 @@ from Utils import *
 
 def model_folder(args, make_folder=True):
     """Returns the folder to which to save a model built with [args]."""
-    data = os.path.basename(os.path.dirname(args.data_tr)).strip("/")
+    data = os.path.basename(os.path.dirname(args.data_tr.strip("/"))).strip("/")
     v_spec = "_".join(args.v_spec)
     folder = f"{project_dir}/models32/{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-v_spec{v_spec}-{args.uid}{suffix_str(args)}"
 
@@ -59,7 +59,7 @@ class ImageLatentDataset(Dataset):
         latents = torch.stack([b[2] for b in batch])
         return images, {"mask_noise": mask_noises, "latents": latents}
 
-def get_image_latent_dataset(model, dataset, latent_spec, args):
+def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
     """Returns an ImageLatent dataset constructed using the data in [dataset].
     This dataset can be used for one epoch's worth of training.
 
@@ -68,6 +68,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
     dataset     -- dataset containing the data to sample
     latent_spec -- dictionary of latent code shapes
     args        -- Namespace with --sp, --ns, and --code_bs arguments
+    epoch       -- the index of the current epoch. Used only for logging
     """
     with torch.no_grad():
         least_losses = torch.ones(len(dataset), device=device) * float("inf")
@@ -85,7 +86,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
             drop_last=False)
 
         all_images = []
-        for idx,(x,_) in tqdm(enumerate(loader),
+        for outer_idx,(x,_) in tqdm(enumerate(loader),
             desc="SAMPLING: Chunks of batch",
             total=len(loader),
             leave=False,
@@ -93,11 +94,11 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
 
             all_images.append(x)
             bs = len(x)
-            start = idx * args.code_bs
-            stop = min(len(dataset), (idx + 1) * args.code_bs)
+            start = outer_idx * args.code_bs
+            stop = min(len(dataset), (outer_idx + 1) * args.code_bs)
             mask_noise_ = mask_noise[start:stop]
 
-            for idx in tqdm(range(args.ns // args.sp),
+            for inner_idx in tqdm(range(args.ns // args.sp),
                 desc=f"SAMPLING: code_bs {args.code_bs} | sp {args.sp}: Iterations over code batch size",
                 leave=False,
                 dynamic_ncols=True):
@@ -117,9 +118,19 @@ def get_image_latent_dataset(model, dataset, latent_spec, args):
                 change_idxs = losses < least_losses[start:stop]
                 best_latents[start:stop][change_idxs] = new_codes[change_idxs].cpu()
 
-                # ll_old = torch.sum(least_losses)
-                least_losses[start:stop][change_idxs] = losses[change_idxs]
-                # assert torch.sum(least_losses) <= ll_old
+                if args.log_sampling and inner_idx > 0:
+                    old_finite_idxs = ~torch.isinf(least_losses)
+                    ll_old_mean = torch.mean(least_losses[old_finite_idxs])
+                    
+                    least_losses[start:stop][change_idxs] = losses[change_idxs]
+                
+                    ll_new_mean = torch.mean(least_losses[old_finite_idxs])
+                    wandb.log({"pretrain/epoch": epoch,
+                        "sampling/loss_mean": ll_new_mean,
+                        "sampling/loss_delta": ll_new_mean - ll_old_mean, 
+                        "sampling/step": epoch * len(loader) * args.ns // args.sp + outer_idx * args.ns // args.sp + inner_idx})
+                else:
+                    least_losses[start:stop][change_idxs] = losses[change_idxs]
 
     return ImageLatentDataset(torch.cat(all_images, axis=0).cpu(),
         mask_noises=mask_noise.cpu(),
@@ -134,7 +145,7 @@ def validate(model, data_tr, data_val, latent_spec, args):
     data_val    -- Dataset of data for linear probe training
     args        -- Namespace with relevant parameters
     """
-    def get_reconstruction_images_loss(model, dataset, latent_spec, args):
+    def get_reconstruction_images_loss(model, dataset, latent_spec, args, return_images=True, z_per_ex=8):
         """Returns an (loss, image_grid) tuple, where [loss] is the average loss
         of [model] on reconstructing images from [dataset] and [image_grid]  is
         a grid of images for qualitatively evaluating the reconstructions.
@@ -159,7 +170,7 @@ def validate(model, data_tr, data_val, latent_spec, args):
                 dynamic_ncols=True):
 
                 bs_spec = {"mask_noise_bs": len(x),
-                    "latents_bs": len(x) * args.z_per_ex}
+                    "latents_bs": len(x) * z_per_ex}
                 z = sample_latent_dict(latent_spec | bs_spec, noise=args.noise)
                 loss, pred, mask = model(x, z,
                     mask_ratio=args.mask_ratio,
@@ -170,39 +181,48 @@ def validate(model, data_tr, data_val, latent_spec, args):
                 preds.append(pred.cpu())
                 masks.append(mask.cpu())
 
-        images = torch.cat(images, dim=0)
-        masks = torch.cat(masks, dim=0)
-        preds = torch.cat(preds, dim=0)
-        preds = preds.view(len(dataset), args.z_per_ex, *preds.shape[1:])
-        image_grid = [[image] + [p for p in pred]
-            for image,pred in zip(images, preds)]
+        if return_images:
+            images = torch.cat(images, dim=0)
+            masks = torch.cat(masks, dim=0)
+            preds = torch.cat(preds, dim=0)
+            preds = preds.view(len(dataset), z_per_ex, *preds.shape[1:])
+            image_grid = [[image] + [p for p in pred]
+                for image,pred in zip(images, preds)]
 
-        return total_loss.item() / (len(dataset)), image_grid
 
-    vae_loss_te, _ = get_reconstruction_images_loss(model,
+        if return_images:
+            return total_loss.item() / (len(dataset)), image_grid
+        else:
+            return total_loss.item() / (len(dataset))
+
+    vae_loss_te = get_reconstruction_images_loss(model,
         Subset(data_val, indices=random.sample(range(len(data_val)), k=512)),
-        latent_spec, args)
+        latent_spec, args,
+        return_images=False,
+        z_per_ex=args.z_per_ex_loss)
 
     idxs_tr = torch.linspace(0, len(data_tr) - 1, args.num_ex_for_eval_tr)
-    idxs_te = torch.linspace(0, len(data_val) - 1, args.num_ex_for_eval_te)
     _, images_tr = get_reconstruction_images_loss(model,
         Subset(data_tr, [int(idx) for idx in idxs_tr.tolist()]),
-        latent_spec, args)
+        latent_spec, args,
+        return_images=True,
+        z_per_ex=args.z_per_ex_vis)
+
+    idxs_te = torch.linspace(0, len(data_val) - 1, args.num_ex_for_eval_te)
     _, images_te = get_reconstruction_images_loss(model,
         Subset(data_val, [int(idx) for idx in idxs_te.tolist()]),
-        latent_spec, args)
+        latent_spec, args,
+        return_images=True,
+        z_per_ex=args.z_per_ex_vis)
 
-    return {"loss/pretrain_test": vae_loss_te,
+    return {"pretrain/loss_te": vae_loss_te,
         "images/pretrain_train": images_to_pil_image(images_tr),
         "images/pretrain_test": images_to_pil_image(images_te)}
 
 def get_args(args=None):
 
     def path_exists_type(x):
-        if os.path.exists(x) or x.startswith("$SLURM_TMPDIR"):
-            return x
-        else:
-            return False
+        return x if os.path.exists(x) or x.startswith("$") else False
 
     P = argparse.ArgumentParser()
     P.add_argument("--wandb", choices=["disabled", "online", "offline"], default="online",
@@ -217,7 +237,8 @@ def get_args(args=None):
         help="Path to checkpoint to resume")
     P.add_argument("--finetune", choices=[0, 1], type=int, default=1,
         help="Whether to finetune an existing MAE model or train from scratch")
-
+    P.add_argument("--imle", choices=[0, 1], type=int, default=1,
+        help="Whether to use IMLE")
     # Data arguments
     P.add_argument("--data_tr", default="data/imagenet/train.tar", type=argparse_file_type,
         help="String specifying training data")
@@ -229,10 +250,19 @@ def get_args(args=None):
         help="Number of training examples for logging")
     P.add_argument("--num_ex_for_eval_te", default=8,
         help="Number of training examples for logging")
-    P.add_argument("--z_per_ex", default=64, type=int,
-        help="Number of latents per example for logging")
+    P.add_argument("--z_per_ex_loss", default=128, type=int,
+        help="Number of latents per example for logging losses")
+    P.add_argument("--z_per_ex_vis", default=8, type=int,
+        help="Number of latents per example for logging images")
+    
+
+    # Logging arguments
     P.add_argument("--eval_iter", type=int, default=1,
         help="Number of epochs between validation")
+    P.add_argument("--save_iter", type=int, default=1,
+        help="Number of epochs between validation")
+    P.add_argument("--log_sampling", choices=[0, 1], type=int, default=1,
+        help="Whether to log sampling data")
 
     # Training arguments
     P.add_argument("--epochs", type=int, default=64,
@@ -250,13 +280,15 @@ def get_args(args=None):
     P.add_argument("--lr", type=float, default=1e-4,
         help="Base learning rate")
     P.add_argument("--min_lr", type=float, default=2e-5,
-        help="Base learning rate")
+        help="Minumum learning rate")
     P.add_argument("--mask_ratio", type=float, default=.75,
         help="Mask ratio for the model")
     P.add_argument("--mini_bs", type=int, default=128,
         help="Batch size for training")
     P.add_argument("--n_ramp", type=int, default=10,
         help="Number of epochs of linear learning rate warmup")
+    P.add_argument("--norm_pix_loss", type=int, default=1, choices=[0, 1],
+        help="Whether to predict normalized pixels")
     P.add_argument("--res", default=256, type=int,
         help="Resolution to get data at")
     P.add_argument("--input_size", default=224, type=int,
@@ -277,16 +309,16 @@ def get_args(args=None):
 
     if len(args.v_spec) == 0:
         tqdm.write(f"WARNING: empty --v_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
-        args.z_per_ex = 1
+        args.z_per_ex_vis = 1
+        args.z_per_ex_loss = 1
     if args.sp > args.ns:
         tqdm.write(f"WARNING: --sp must be at most --ns. Setting --sp to --ns.")
         args.sp = args.ns
-
-    args.float32 = 1
     return args
 
 if __name__ == "__main__":
     args = get_args()
+    pretty_print_args(args)
 
     ############################################################################
     # Load resumed things or instantiate them
@@ -298,16 +330,20 @@ if __name__ == "__main__":
 
         if args.arch == "base_pretrained":
             mae_model_state = torch.load(f"{project_dir}/mae_checkpoints/mae_pretrain_vit_base_full.pth")["model"]
-            mae = mae_vit_base_patch16()
+            mae = mae_vit_base_patch16(norm_pix_loss=args.norm_pix_loss)
         elif args.arch == "large_pretrained":
             mae_model_state = torch.load(f"{project_dir}/mae_checkpoints/mae_pretrain_vit_large_full.pth")["model"]
-            mae = mae_vit_large_patch16_dec512d8b()
+            mae = mae_vit_large_patch16(norm_pix_loss=args.norm_pix_loss)
         else:
             raise NotImplementedError()
 
         mae.load_state_dict(mae_model_state)
-        model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
-        model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs).to(device)
+        if args.imle:       
+            model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
+            model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs).to(device)
+        else:
+            model = mae.to(device)
+
         model = nn.DataParallel(model, device_ids=args.gpus).to(device)
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-6)
         last_epoch = -1
@@ -315,6 +351,7 @@ if __name__ == "__main__":
         raise NotImplementedError()
 
     save_dir = model_folder(args)
+    tqdm.write(f"LOG: Will save to {save_dir.replace(project_dir, '').strip('/')}")
     data_tr = data_path_to_dataset(args.data_tr,
         transform=get_train_transforms(args))
     data_val = data_path_to_dataset(args.data_val,
@@ -340,10 +377,9 @@ if __name__ == "__main__":
         results["images/pretrain_test"].save(f"{save_dir}/images/0_test.png")
         results["images/pretrain_train"] = wandb.Image(results["images/pretrain_train"])
         results["images/pretrain_test"] = wandb.Image(results["images/pretrain_test"])
-        wandb.log(results | {"epoch": 0}, step=0)
-        tqdm.write(f"Epoch {0:4}/{args.epochs} | loss/pretrain_test {results['loss/pretrain_test']}")
+        wandb.log(results | {"pretrain/epoch": 0, "pretrain/step": 0})
+        tqdm.write(f"Epoch {0:4}/{args.epochs} | pretrain/loss_te {results['pretrain/loss_te']}")
 
-    scaler = torch.cuda.amp.GradScaler()
     log_iter = max(1, int(args.epochs * args.ipe / 10000))
     tqdm.write(f"LOG: Will log every {log_iter} gradient steps")
     cur_step = 0 if last_epoch == -1 else (last_epoch + 1) * args.ipe
@@ -354,7 +390,7 @@ if __name__ == "__main__":
 
         batch_data_tr = Subset(data_tr, indices=kkm.pop_k(args.ex_per_epoch))
         batch_dataset = get_image_latent_dataset(model, batch_data_tr,
-            latent_spec, args)
+            latent_spec, args, epoch=epoch)
         loader = DataLoader(batch_dataset,
             batch_size=args.mini_bs,
             shuffle=True,
@@ -383,9 +419,11 @@ if __name__ == "__main__":
             cur_step += 1
 
             if cur_step % log_iter == 0:
-                wandb.log({"loss/pretrain_train": loss.item(),
-                    "lr": scheduler.get_lr()[0]},
-                    step=cur_step)
+                wandb.log({"pretrain/loss_tr": loss.item(),
+                    "pretrain/lr": scheduler.get_lr()[0],
+                    "pretrain/step": cur_step})
+                tqdm.write(f"\t{cur_step} loss_tr {loss.item()} | pretrain/lr {scheduler.get_lr()[0]}")
+
 
         ########################################################################
         # Validate and save a checkpoint
@@ -398,25 +436,27 @@ if __name__ == "__main__":
             results["images/pretrain_train"] = wandb.Image(results["images/pretrain_train"])
             results["images/pretrain_test"] = wandb.Image(results["images/pretrain_test"])
 
-            data_to_log = results | {"loss/pretrain_train": loss.item(),
-                "lr": scheduler.get_lr()[0],
-                "epoch": epoch+1}
+            data_to_log = results | {"pretrain/loss_tr": loss.item(),
+                "pretrain/lr": scheduler.get_lr()[0],
+                "pretrain/epoch": epoch+1}
 
-            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | lr {scheduler.get_lr()[0]:.5f} | loss/pretrain_train {data_to_log['loss/pretrain_train']} | loss/pretrain_test {data_to_log['loss/pretrain_test']}")
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5f} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']} | pretrain/loss_te {data_to_log['pretrain/loss_te']}")
         else:
             data_to_log = {"loss/pretrain": loss.item(),
-                "lr": scheduler.get_lr()[0],
-                "epoch": epoch+1}
-            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | lr {scheduler.get_lr()[0]:.5f} | loss/pretrain_train {data_to_log['loss/pretrain_train']}")
-
-        wandb.log(data_to_log, step=cur_step)
-        torch.save({"model": de_dataparallel(model).cpu().state_dict(),
-            "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
-            "idx2v_method": de_dataparallel(model).idx2v_method,
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler,
-            "args": args,
-            "last_epoch": epoch,
-            "kkm": kkm},
-            f"{model_folder(args)}/{epoch+1}.pt")
-        model = model.to(device)
+                "pretrain/lr": scheduler.get_lr()[0],
+                "pretrain/epoch": epoch+1}
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5f} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']}")
+        
+        wandb.log(data_to_log | {"pretrain/step": cur_step})
+        
+        if epoch % args.save_iter == 0 and args.save_iter > 0:    
+            torch.save({"model": de_dataparallel(model).cpu().state_dict(),
+                "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
+                "idx2v_method": de_dataparallel(model).idx2v_method,
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler,
+                "args": args,
+                "last_epoch": epoch,
+                "kkm": kkm},
+                f"{model_folder(args)}/{epoch+1}.pt")
+            model = model.to(device)

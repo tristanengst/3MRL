@@ -235,18 +235,44 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             raise NotImplementedError()
 
-    def forward(self, x, mask_ratio=0.75, reduction="mean"):
+    def forward(self, x, z, mask_ratio=0.75, reduction="mean", return_all=False):
         """
         Args:
         x           -- BSxCxHxW tensor of images to encode
         mask_ratio  -- mask ratio
         """
-        latent, mask, ids_restore = self.forward_encoder(x, mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        loss = self.forward_loss(x, pred, mask, reduction=reduction)
-        pred, mask = restore_model_outputs(pred, mask, self.patch_embed,
-            self.unpatchify)
-        return loss, pred, mask
+        if return_all:
+            latent, mask, ids_restore = self.forward_encoder(x, mask_ratio)
+            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+            loss = self.forward_loss(x, pred, mask, reduction=reduction)
+            pred, mask = restore_model_outputs(pred, mask, self.patch_embed,
+                self.unpatchify)
+            return loss, pred, mask
+        else:
+            latent, mask, ids_restore = self.forward_encoder(x, mask_ratio)
+            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+            return self.forward_loss(x, pred, mask, reduction=reduction)
+
+    def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
+        """Returns the latent specification for the network. Requires that the
+        model is on the "cuda" device.
+
+        Args:
+        test_input  -- a BSxCxHxW tensor to be used as the test input
+        input_size  -- spatial resolution of a tensor to be used in place of
+                        [test_input] if [test_input] is None
+        mask_ratio  -- mask ratio
+        """
+        if not input_size is None and test_input is None:
+            test_input = torch.ones(4, 3, input_size, input_size, device="cuda")
+
+        with torch.no_grad():
+            x = self.patch_embed(test_input)
+            x = x + self.pos_embed[:, 1:, :]
+            mask_noise_shape = (x.shape[1],)
+            return {"mask_noise": mask_noise_shape,
+                "mask_noise_type": "uniform",
+                "latents": None}
 
 def extend_idx2v_method(idx2v_method, length):
     """Returns [idx2v_method] extended to [length] by adding key-value pairs
@@ -549,11 +575,11 @@ class MaskedVAEViT(MaskedAutoencoderViT):
 
         if len(set(shapes)) == 0:
             return {"mask_noise": mask_noise_shape,
-                "mask_noise_type": "gaussian",
+                "mask_noise_type": "uniform",
                 "latents": None}
         elif len(set(shapes)) == 1:
             return {"mask_noise": mask_noise_shape,
-                "mask_noise_type": "gaussian",
+                "mask_noise_type": "uniform",
                 "latents": (len(shapes),) + shapes[0]}
         else:
             raise ValueError(f"Got multiple shapes for latent codes {shapes}")
