@@ -14,6 +14,7 @@ from timm.models.vision_transformer import PatchEmbed, Block
 from original_code.util import pos_embed as PE
 
 from Utils import *
+from Blocks import AdaIN, VariationalBottleneck
 from Augmentation import de_normalize
 
 class MaskedAutoencoderViT(nn.Module):
@@ -274,6 +275,44 @@ class MaskedAutoencoderViT(nn.Module):
                 "mask_noise_type": "uniform",
                 "latents": None}
 
+def parse_variational_spec(args):
+    """Returns args.v_spec as a dictionary mapping transformer block indices to
+    whether and how they should be variational. Blocks whose indices aren't in
+    the mapping are assumed in model __init__ methods to be non-variational and
+    such blocks need not be specified in the returned dictionary.
+    """
+    def parse_v_spec_helper(s):
+        if s in ["add", "zero"] or not s:
+            return s
+        elif s.startswith("AdaIN"):
+            return AdaIN()
+        elif s.startswith("bottleneck_add"):
+            if "base" in args.arch:
+                return VariationalBottleneck(
+                    encoder_layers=args.encoder_layers,
+                    encoder_h_dim=args.encoder_h_dim,
+                    h_dim=args.h_dim,
+                    decoder_layers=args.decoder_layers,
+                    decoder_h_dim=args.decoder_h_dim,
+                    decoder_out_dim=768,
+                    act_type=args.act_type,
+                    normalize_z=args.normalize_z)
+            else:
+                raise NotImplementedError()
+        elif s.startswith("adain"):
+            if "base" in args.arch:
+                return AdaIN(c=768, act_type=args.act_type)
+            else:
+                raise NotImplementedError()
+        else:
+            raise NotImplementedError()
+
+    key_args = [int(k) for idx,k in enumerate(args.v_spec) if idx % 2 == 0]
+    val_args = [v for idx,v in enumerate(args.v_spec) if idx % 2 == 1]
+    assert len(key_args) == len(val_args)
+    return {k: parse_v_spec_helper(v) for k,v in zip(key_args, val_args)}
+
+
 def extend_idx2v_method(idx2v_method, length):
     """Returns [idx2v_method] extended to [length] by adding key-value pairs
     where the value is False such that the returned dictionary has the first
@@ -314,7 +353,7 @@ class VariationalBlock(nn.Module):
         else:
             raise NotImplementedError()
 
-    def forward(self, x, z):
+    def forward(self, x, z, ignore_z=False):
         """Forward function.
 
         Args:
@@ -324,6 +363,10 @@ class VariationalBlock(nn.Module):
                 IMLE training and the latter for density-based linear probing
         """
         fx = self.block(x)
+
+        if ignore_z:
+            return fx
+
         z = z() if isinstance(z, nn.Module) else z
         if self.v_method == "add":
             fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
@@ -449,13 +492,18 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
         else:
             raise ValueError(f"Got multiple shapes for latent codes {shapes}")
 
-    def forward_features(self, x, z):
+    def forward_features(self, x, z=None, z_per_ex=1, noise=None, ignore_z=False):
         """Returns representations for [x].
 
         Args:
         x   -- BSxCxHxW images to compute representations for
         z   -- list of noises, one for each variational block
         """
+        if z is None:
+            z = sample_latent_dict(self.latent_spec,
+                bs=len(x) * z_per_ex,
+                noise=self.noise if noise is None else noise)
+
         B = x.shape[0]
         x = self.patch_embed(x)
 
@@ -466,7 +514,7 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
 
         for idx,block in self.idx2block.items():
             if int(idx) in self.block_idx2z_idx:
-                x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]])
+                x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]], ignore_z=ignore_z)
             else:
                 x = block(x)
 
@@ -477,7 +525,7 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
             x = self.norm(x)
             return x[:, 0]
 
-    def forward(self, x, z=None, noise=None, z_per_ex=1):
+    def forward(self, x, z=None, noise=None, z_per_ex=1, ignore_z=False):
         """Forward function for getting class predictions.
 
         Requires that set_latent_spec() has been called on the model.
@@ -488,12 +536,16 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
         noise   -- method for generating [z] if it is None
         z_per_x -- number of latents for example if [z] is None
         """
-        if z is None:
-            z = sample_latent_dict(self.latent_spec,
-                bs=len(x) * z_per_ex,
-                noise=self.noise if noise is None else noise)
-        
-        return self.forward_head(self.forward_features(x, z))
+        return self.forward_head(self.forward_features(x, z,
+            noise=noise, z_per_ex=z_per_ex, ignore_z=ignore_z))
+
+class VariationalViTBackbone(VariationalViT):
+    """VariationalViT as a backbone network."""
+    def __init__(self, **kwargs):
+        super(VariationalViTBackbone, self).__init__(**kwargs)
+
+    def forward(self, *args, **kwargs):
+        return super().forward_features(*args, **kwargs)
 
 class MaskedVAEViT(MaskedAutoencoderViT):
     """Masked VAE with VisionTransformer backbone.
@@ -584,7 +636,7 @@ class MaskedVAEViT(MaskedAutoencoderViT):
         else:
             raise ValueError(f"Got multiple shapes for latent codes {shapes}")
 
-    def forward_encoder(self, x, z, mask_ratio):
+    def forward_encoder(self, x, z, mask_ratio, ignore_z=False):
         """Forward function for the encoder.
 
         Args:
@@ -596,6 +648,7 @@ class MaskedVAEViT(MaskedAutoencoderViT):
         """
         x = self.patch_embed(x)
         x = x + self.pos_embed[:, 1:, :]
+
         x, mask, ids_restore = self.random_masking(x, mask_ratio, mask_noise=z["mask_noise"])
 
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
@@ -604,14 +657,14 @@ class MaskedVAEViT(MaskedAutoencoderViT):
 
         for idx,block in self.idx2block.items():
             if int(idx) in self.block_idx2z_idx:
-                x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]])
+                x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]], ignore_z=ignore_z)
             else:
                 x = block(x)
 
         x = self.norm(x)
         return x, mask, ids_restore
 
-    def forward(self, x, z, mask_ratio=0.75, reduction="mean", return_all=False):
+    def forward(self, x, z, mask_ratio=0.75, reduction="mean", return_all=False, ignore_z=False):
         """Forward function returning the loss, reconstructed image, and mask.
 
         Args:
@@ -624,14 +677,14 @@ class MaskedVAEViT(MaskedAutoencoderViT):
         return_all  -- whether to return a (loss, images, masks) tuple or loss
         """
         if return_all:
-            latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio)
+            latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio, ignore_z=ignore_z)
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
             loss = self.forward_loss(x, pred, mask, reduction=reduction)
             pred, mask = restore_model_outputs(pred, mask, self.patch_embed,
                 self.unpatchify)
             return loss, pred, mask
         else:
-            latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio)
+            latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio, ignore_z=ignore_z)
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
             return self.forward_loss(x, pred, mask, reduction=reduction)
 
@@ -648,8 +701,6 @@ def restore_model_outputs(pred, mask, patch_embed, unpatchify):
     mask = mask.unsqueeze(-1).repeat(1, 1, patch_embed.patch_size[0]**2 *3)
     mask = unpatchify(mask)
     return pred, mask
-
-
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(

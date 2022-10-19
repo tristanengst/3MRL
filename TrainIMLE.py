@@ -15,6 +15,7 @@ from original_code.models_mae import mae_vit_base_patch16 as foo
 from Augmentation import *
 from ApexUtils import *
 from Data import *
+from FastLinearProbe import fast_linear_probe
 from Models import *
 from Utils import *
 
@@ -136,7 +137,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
         mask_noises=mask_noise.cpu(),
         latents=best_latents)
 
-def validate(model, data_tr, data_val, latent_spec, args):
+def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
     """Returns a dictionary of validation data about [model].
 
     Args:
@@ -187,14 +188,16 @@ def validate(model, data_tr, data_val, latent_spec, args):
             masks = torch.cat(masks, dim=0)
             preds = torch.cat(preds, dim=0)
             preds = preds.view(len(dataset), z_per_ex, *preds.shape[1:])
-            image_grid = [[image] + [p for p in pred]
-                for image,pred in zip(images, preds)]
+            image_grid = [[img] + [p for p in pred]
+                for img,pred in zip(images, preds)]
 
 
         if return_images:
             return total_loss.item() / (len(dataset)), image_grid
         else:
             return total_loss.item() / (len(dataset))
+
+    probe_acc = fast_linear_probe(model, data_tr, data_val, args, ignore_z=ignore_z)
 
     vae_loss_te = get_reconstruction_images_loss(model,
         Subset(data_val, indices=random.sample(range(len(data_val)), k=512)),
@@ -216,7 +219,9 @@ def validate(model, data_tr, data_val, latent_spec, args):
         return_images=True,
         z_per_ex=args.z_per_ex_vis)
 
-    return {"pretrain/loss_te": vae_loss_te,
+    return {
+        "fast_linear_probe/acc_te": probe_acc,
+        "pretrain/loss_te": vae_loss_te,
         "images/pretrain_train": images_to_pil_image(images_tr),
         "images/pretrain_test": images_to_pil_image(images_te)}
 
@@ -297,6 +302,39 @@ def get_args(args=None):
     P.add_argument("--noise", default="gaussian", choices=["gaussian", "zeros"],
         help="Kind of noise to add inside the model")
 
+    # Interesting variational block arguments
+    P.add_argument("--encoder_layers", type=int, default=2,
+        help="Number of VariationalBottleneck encoder layers")
+    P.add_argument("--encoder_h_dim", type=int, default=2048,
+        help="VariationalBottleneck encoder dimensionality")
+    P.add_argument("--h_dim", type=int, default=128,
+        help="Bottleneck dimensionality in which noise is added")
+    P.add_argument("--decoder_layers", type=int, default=2,
+        help="Number of VariationalBottleneck encoder layers")
+    P.add_argument("--decoder_h_dim", type=int, default=2048,
+        help="VariationalBottleneck decoder dimensionality")
+    P.add_argument("--act_type", default="gelu", choices=["gelu"],
+        help="Activation type")
+    P.add_argument("--normalize_z", type=int, default=1, choices=[0, 1],
+        help="Whether to normalize latent codes")
+
+    # Linear probe arguments
+    P.add_argument("--global_pool", type=int, default=1, choices=[0, 1],
+        help="Whether to global pool in linear probing")
+    P.add_argument("--probe_bs", type=int, default=128,
+        help="Linear probe training batch size")
+    P.add_argument("--probe_bs_val", type=int, default=2048,
+        help="Linear probe test/data gathering batch size")
+    P.add_argument("--probe_ex_tr", type=int, default=16384,
+        help="Number of linear probe training examples")
+    P.add_argument("--probe_ex_val", type=int, default=16384,
+        help="Number of linear probe test examples")
+    P.add_argument("--probe_lr", type=float, default=1e-3,
+        help="Linear probe base learning rate")
+    P.add_argument("--probe_epochs", type=int, default=100,
+        help="Linear probe number of epochs")
+
+
     # Hardware arguments
     P.add_argument("--gpus", nargs="+", default=[0, 1], type=int,
         help="Device IDs of GPUs to use")
@@ -372,14 +410,14 @@ if __name__ == "__main__":
     # Begin training
     ############################################################################
     if last_epoch == -1:
-        results = validate(model, data_tr, data_val, latent_spec, args)
+        results = validate(model, data_tr, data_val, latent_spec, args, ignore_z=True)
         conditional_safe_make_directory(f"{save_dir}/images")
         results["images/pretrain_train"].save(f"{save_dir}/images/0_train.png")
         results["images/pretrain_test"].save(f"{save_dir}/images/0_test.png")
         results["images/pretrain_train"] = wandb.Image(results["images/pretrain_train"])
         results["images/pretrain_test"] = wandb.Image(results["images/pretrain_test"])
         wandb.log(results | {"pretrain/epoch": 0, "pretrain/step": 0})
-        tqdm.write(f"Epoch {0:4}/{args.epochs} | pretrain/loss_te {results['pretrain/loss_te']}")
+        tqdm.write(f"Epoch {0:4}/{args.epochs} | pretrain/loss_te {results['pretrain/loss_te']} | fast_linear_probe/acc_te {results['fast_linear_probe/acc_te']}")
 
     scaler = torch.cuda.amp.GradScaler()
     log_iter = max(1, int(args.epochs * args.ipe / 10000))
@@ -427,7 +465,7 @@ if __name__ == "__main__":
                 wandb.log({"pretrain/loss_tr": loss.item(),
                     "pretrain/lr": scheduler.get_lr()[0],
                     "pretrain/step": cur_step})
-                tqdm.write(f"\t{cur_step} loss_tr {loss.item()} | pretrain/lr {scheduler.get_lr()[0]}")
+                tqdm.write(f"\t{cur_step} loss_tr {loss.item()} | pretrain/lr {scheduler.get_lr()[0]:.5e}")
 
 
         ########################################################################
@@ -445,12 +483,12 @@ if __name__ == "__main__":
                 "pretrain/lr": scheduler.get_lr()[0],
                 "pretrain/epoch": epoch+1}
 
-            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5f} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']} | pretrain/loss_te {data_to_log['pretrain/loss_te']}")
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5e} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']} | pretrain/loss_te {data_to_log['pretrain/loss_te']}")
         else:
             data_to_log = {"loss/pretrain": loss.item(),
                 "pretrain/lr": scheduler.get_lr()[0],
                 "pretrain/epoch": epoch+1}
-            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5f} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']}")
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5e} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']} | fast_linear_probe/acc_te {data_to_log['fast_linear_probe/acc_te']}")
         
         wandb.log(data_to_log | {"pretrain/step": cur_step})
         

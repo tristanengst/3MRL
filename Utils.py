@@ -29,26 +29,6 @@ def de_dataparallel(net):
     """
     return net.module if isinstance(net, nn.DataParallel) else net
 
-def parse_variational_spec(args):
-    """Returns args.v_spec as a dictionary mapping transformer block indices to
-    whether and how they should be variational. Blocks whose indices aren't in
-    the mapping are assumed in model __init__ methods to be non-variational and
-    such blocks need not be specified in the returned dictionary.
-    """
-    def parse_v_spec_helper(s):
-        if s in ["add", "zero"] or not s:
-            return s
-        elif s.startswith("downsample_mlp_"):
-            hidden_dim = int(s[len("downsample_mlp_"):])
-            raise NotImplementedError()
-        else:
-            raise NotImplementedError()
-
-    key_args = [int(k) for idx,k in enumerate(args.v_spec) if idx % 2 == 0]
-    val_args = [v for idx,v in enumerate(args.v_spec) if idx % 2 == 1]
-    assert len(key_args) == len(val_args)
-    return {k: parse_v_spec_helper(v) for k,v in zip(key_args, val_args)}
-
 def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
     """Returns dictionary [d] after mapping all its values that are tuples of
     integers to Gaussian noise tensors with shapes given by the tuples.
@@ -69,7 +49,7 @@ def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
     def get_sample(key, dims):
         if dims is None:
             dims = ()
-            
+
         noise_ = d[f"{key}_noise_type"] if f"{key}_noise_type" in d else noise
         bs_ = d[f"{key}_bs"] if f"{key}_bs" in d else bs
 
