@@ -76,7 +76,7 @@ class FeatureDataset(Dataset):
     def __getitem__(self, idx): return self.feats[idx], self.labels[idx]
 
 
-def fast_linear_probe(model, data_tr, data_val, args, ignore_z=False, classes=None):
+def fast_linear_probe(model, data_tr, data_val, args, classes=None):
     """Returns a linear probe of [data_tr] and [data_val] using the encoder of
     [model] as a backbone. This can be done in a few minutes, but isn't as
     accurate as the LinearProbe.py script, which can take up to a day to run.
@@ -121,12 +121,12 @@ def fast_linear_probe(model, data_tr, data_val, args, ignore_z=False, classes=No
         model=backbone,
         num_workers=args.num_workers,
         bs=args.probe_bs_val,
-        ignore_z=ignore_z)
+        ignore_z=args.probe_ignore_z)
     data_val = FeatureDataset(data_val,
         model=backbone,
         num_workers=args.num_workers,
         bs=args.probe_bs_val,
-        ignore_z=ignore_z)
+        ignore_z=args.probe_ignore_z)
     loader_tr = DataLoader(data_tr,
         shuffle=True,
         batch_size=args.probe_bs,
@@ -192,6 +192,9 @@ def get_args(args=None):
     P = argparse.ArgumentParser()
     P.add_argument("--model", type=str, required=True,
         help="Path to model to use as a backbone, or string specifying it")
+
+    P.add_argument("--probe_ignore_z",  type=int, default=1, choices=[0, 1],
+        help="Whether to ignore the code in all linear probing")
 
     P.add_argument("--data_tr", default="data/imagenet/train.tar", 
         type=argparse_file_type,

@@ -107,7 +107,8 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                 latents = sample_latent_dict(latents_only_spec, bs * args.sp, noise=args.noise)
                 z = {"mask_noise": mask_noise_} | latents
                 with torch.cuda.amp.autocast():
-                    losses = model(x, z, mask_ratio=args.mask_ratio,
+                    losses = model(x, z,
+                        mask_ratio=args.mask_ratio,
                         reduction="batch")
                 _, idxs = torch.min(losses.view(bs, args.sp), dim=1)
 
@@ -137,7 +138,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
         mask_noises=mask_noise.cpu(),
         latents=best_latents)
 
-def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
+def validate(model, data_tr, data_val, latent_spec, args):
     """Returns a dictionary of validation data about [model].
 
     Args:
@@ -177,7 +178,7 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
                     loss, pred, mask = model(x, z,
                         mask_ratio=args.mask_ratio,
                         return_all=True,
-                        ignore_z=ignore_z)
+                        ignore_z=args.ignore_z)
 
                 total_loss += (loss.mean() * len(x)).detach()
                 images.append(de_normalize(x).cpu())
@@ -198,12 +199,11 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
         else:
             return total_loss.item() / (len(dataset))
 
-    tqdm.write(f"---- VALIDATION | ignore_z [{bool(ignore_z)}] ----")
+    tqdm.write(f"---- VALIDATION | probe_ignore_z [{bool(args.probe_ignore_z)}] ----")
     if args.fast_linear_probe:
         classes = torch.linspace(0, len(data_tr.classes) - 1, args.val_n_way)
         classes = [data_tr.classes[int(c.item())] for c in classes]
         probe_acc = fast_linear_probe(model, data_tr, data_val, args,   
-            ignore_z=ignore_z,
             classes=classes)
     else:
         probe_acc = -1
@@ -407,7 +407,7 @@ if __name__ == "__main__":
     # Begin training
     ############################################################################
     if last_epoch == -1:
-        results = validate(model, data_tr, data_val, latent_spec, args, ignore_z=True)
+        results = validate(model, data_tr, data_val, latent_spec, args)
         conditional_safe_make_directory(f"{save_dir}/images")
         results["images/pretrain_train"].save(f"{save_dir}/images/0_train.png")
         results["images/pretrain_test"].save(f"{save_dir}/images/0_test.png")
@@ -471,7 +471,7 @@ if __name__ == "__main__":
         # Validate and save a checkpoint
         ########################################################################
         if epoch % args.eval_iter == 0:
-            results = validate(model, data_tr, data_val, latent_spec, args, ignore_z=args.ignore_z | args.probe_ignore_z)
+            results = validate(model, data_tr, data_val, latent_spec, args)
             conditional_safe_make_directory(f"{save_dir}/images")
             results["images/pretrain_train"].save(f"{save_dir}/images/{epoch+1}_train.png")
             results["images/pretrain_test"].save(f"{save_dir}/images/{epoch+1}_test.png")
