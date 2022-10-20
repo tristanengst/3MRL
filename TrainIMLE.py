@@ -306,28 +306,14 @@ def get_args(args=None):
         help="Number of epochs of linear learning rate warmup")
     P.add_argument("--norm_pix_loss", type=int, default=1, choices=[0, 1],
         help="Whether to predict normalized pixels")
-    P.add_argument("--res", default=256, type=int,
-        help="Resolution to get data at")
     P.add_argument("--input_size", default=224, type=int,
         help="Size of (cropped) images to feed to the model")
     P.add_argument("--noise", default="gaussian", choices=["gaussian", "zeros"],
         help="Kind of noise to add inside the model")
 
     # Interesting variational block arguments
-    P.add_argument("--encoder_layers", type=int, default=2,
-        help="Number of VariationalBottleneck encoder layers")
-    P.add_argument("--encoder_h_dim", type=int, default=2048,
-        help="VariationalBottleneck encoder dimensionality")
-    P.add_argument("--h_dim", type=int, default=128,
-        help="Bottleneck dimensionality in which noise is added")
-    P.add_argument("--decoder_layers", type=int, default=2,
-        help="Number of VariationalBottleneck encoder layers")
-    P.add_argument("--decoder_h_dim", type=int, default=2048,
-        help="VariationalBottleneck decoder dimensionality")
     P.add_argument("--act_type", default="gelu", choices=["gelu"],
         help="Activation type")
-    P.add_argument("--normalize_z", type=int, default=1, choices=[0, 1],
-        help="Whether to normalize latent codes")
 
     # Linear probe arguments
     P.add_argument("--global_pool", type=int, default=1, choices=[0, 1],
@@ -346,6 +332,8 @@ def get_args(args=None):
         help="Linear probe number of epochs")
     P.add_argument("--probe_eval_iter", type=int, default=-1,
         help="Number of epochs between validation")
+    P.add_argument("--probe_ignore_z",  type=int, default=1, choices=[0, 1],
+        help="Whether to ignore the code in all linear probing")
 
     # Hardware arguments
     P.add_argument("--gpus", nargs="+", default=[0, 1], type=int,
@@ -483,7 +471,7 @@ if __name__ == "__main__":
         # Validate and save a checkpoint
         ########################################################################
         if epoch % args.eval_iter == 0:
-            results = validate(model, data_tr, data_val, latent_spec, args, ignore_z=args.ignore_z)
+            results = validate(model, data_tr, data_val, latent_spec, args, ignore_z=args.ignore_z | args.probe_ignore_z)
             conditional_safe_make_directory(f"{save_dir}/images")
             results["images/pretrain_train"].save(f"{save_dir}/images/{epoch+1}_train.png")
             results["images/pretrain_test"].save(f"{save_dir}/images/{epoch+1}_test.png")
