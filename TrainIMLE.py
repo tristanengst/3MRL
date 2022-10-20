@@ -108,7 +108,8 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                 z = {"mask_noise": mask_noise_} | latents
                 with torch.cuda.amp.autocast():
                     losses = model(x, z, mask_ratio=args.mask_ratio,
-                        reduction="batch")
+                        reduction="batch",
+                        ignore_z=True)
                 _, idxs = torch.min(losses.view(bs, args.sp), dim=1)
 
                 new_codes = z["latents"]
@@ -176,7 +177,8 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
                 with torch.cuda.amp.autocast():
                     loss, pred, mask = model(x, z,
                         mask_ratio=args.mask_ratio,
-                        return_all=True)
+                        return_all=True,
+                        ignore_z=ignore_z)
 
                 total_loss += (loss.mean() * len(x)).detach()
                 images.append(de_normalize(x).cpu())
@@ -197,7 +199,7 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
         else:
             return total_loss.item() / (len(dataset))
 
-    probe_acc = fast_linear_probe(model, data_tr, data_val, args, ignore_z=ignore_z)
+    probe_acc = 0 # fast_linear_probe(model, data_tr, data_val, args, ignore_z=ignore_z)
 
     vae_loss_te = get_reconstruction_images_loss(model,
         Subset(data_val, indices=random.sample(range(len(data_val)), k=512)),
@@ -243,7 +245,7 @@ def get_args(args=None):
         help="Path to checkpoint to resume")
     P.add_argument("--finetune", choices=[0, 1], type=int, default=1,
         help="Whether to finetune an existing MAE model or train from scratch")
-    P.add_argument("--imle", choices=[0, 1], type=int, default=1,
+    P.add_argument("--ignore_z", choices=[0, 1], type=int, default=0,
         help="Whether to use IMLE")
     # Data arguments
     P.add_argument("--data_tr", default="data/imagenet/train.tar", type=argparse_file_type,
@@ -377,11 +379,8 @@ if __name__ == "__main__":
             raise NotImplementedError()
 
         mae.load_state_dict(mae_model_state)
-        if args.imle:       
-            model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
-            model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs).to(device)
-        else:
-            model = mae.to(device)
+        model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
+        model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs).to(device)
 
         model = nn.DataParallel(model, device_ids=args.gpus).to(device)
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-6)
@@ -451,7 +450,9 @@ if __name__ == "__main__":
             leave=False):
 
             with torch.cuda.amp.autocast():
-                loss = model(x, z, mask_ratio=args.mask_ratio)
+                loss = model(x, z,
+                    mask_ratio=args.mask_ratio,
+                    ignore_z=args.ignore_z)
                 loss = torch.mean(loss)
 
             scaler.scale(loss).backward()
@@ -472,7 +473,7 @@ if __name__ == "__main__":
         # Validate and save a checkpoint
         ########################################################################
         if epoch % args.eval_iter == 0:
-            results = validate(model, data_tr, data_val, latent_spec, args)
+            results = validate(model, data_tr, data_val, latent_spec, args, ignore_z=args.ignore_z)
             conditional_safe_make_directory(f"{save_dir}/images")
             results["images/pretrain_train"].save(f"{save_dir}/images/{epoch+1}_train.png")
             results["images/pretrain_test"].save(f"{save_dir}/images/{epoch+1}_test.png")
@@ -483,7 +484,7 @@ if __name__ == "__main__":
                 "pretrain/lr": scheduler.get_lr()[0],
                 "pretrain/epoch": epoch+1}
 
-            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5e} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']} | pretrain/loss_te {data_to_log['pretrain/loss_te']}")
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5e} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']} | pretrain/loss_te {data_to_log['pretrain/loss_te']} | fast_linear_probe/acc_te {data_to_log['fast_linear_probe/acc_te']}")
         else:
             data_to_log = {"loss/pretrain": loss.item(),
                 "pretrain/lr": scheduler.get_lr()[0],

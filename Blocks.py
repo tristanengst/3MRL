@@ -36,6 +36,15 @@ class MLP(nn.Module):
             
             self.model = nn.Sequential(*layers)
         
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        # we use xavier_uniform following official JAX ViT:
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+        if isinstance(m, nn.Linear) and m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+        
     def forward(self, x): return self.model(x)
 
 class AdaIN(nn.Module):
@@ -53,10 +62,10 @@ class AdaIN(nn.Module):
         self.mapping_net = MLP(in_dim=512,
             h_dim=512,
             layers=8,
-            out_dim=c,
+            out_dim=c * 2,
             act_type=act_type)
 
-    def get_latent_spec(self, x): return (x.shape[1], 512)
+    def get_latent_spec(self, x): return (512,)
 
     def forward(self, x, z):
         """
@@ -64,16 +73,14 @@ class AdaIN(nn.Module):
         x   -- image features
         z   -- latent codes
         """
-        z = self.mapping_net(z) # BSxPxC
+        z = self.mapping_net(z)
+        z_mean = z[:, 0]
+        z_std = z[:, 1]
+
         x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
-        x_mean = torch.mean(x, keepdim=True, dim=-1)
-        x_std = torch.std(x, keepdim=True, dim=-1) + self.epsilon
-        z_mean = torch.mean(z, keepdim=True, dim=-1)
-        z_std = torch.std(z, keepdim=True, dim=-1) + self.epsilon
-
-        x_normalized = (x - x_mean.expand(*x.shape)) / x_std.expand(*x.shape)
-        return z_std.expand(*x.shape) * x_normalized + z_mean.expand(*x.shape)
-
+        z_mean = z_mean.unsqueeze(-1).unsqueeze(-1).expand(*x.shape)
+        z_std = z_std.unsqueeze(-1).unsqueeze(-1).expand(*x.shape)
+        return z_mean + x * z_std
 
 class VariationalBottleneck(nn.Module):
 

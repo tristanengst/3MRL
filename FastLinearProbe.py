@@ -83,13 +83,15 @@ def fast_linear_probe(model, data_tr, data_val, args, ignore_z=False):
 
     # Get the data
     num_classes = len(data_tr.classes)
-    data_tr = Subset(data_tr, indices=list(range(args.probe_ex_tr)))
+    idxs_tr = torch.linspace(0, len(data_val) - 1, args.probe_ex_tr)
+    data_tr = Subset(data_tr, [int(idx) for idx in idxs_tr.tolist()])
     data_tr = FeatureDataset(data_tr,
         model=backbone,
         num_workers=args.num_workers,
         bs=args.probe_bs_val,
         ignore_z=ignore_z)
-    data_val = Subset(data_val, indices=list(range(args.probe_ex_val)))
+    idxs_val = torch.linspace(0, len(data_val) - 1, args.probe_ex_val)
+    data_val = Subset(data_val, [int(idx) for idx in idxs_val.tolist()])
     data_val = FeatureDataset(data_val,
         model=backbone,
         num_workers=args.num_workers,

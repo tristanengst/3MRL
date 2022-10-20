@@ -302,6 +302,8 @@ def parse_variational_spec(args):
         elif s.startswith("adain"):
             if "base" in args.arch:
                 return AdaIN(c=768, act_type=args.act_type)
+            elif "large" in args.arch:
+                return AdaIN(c=1024, act_type=args.act_type)
             else:
                 raise NotImplementedError()
         else:
@@ -363,9 +365,8 @@ class VariationalBlock(nn.Module):
                 IMLE training and the latter for density-based linear probing
         """
         fx = self.block(x)
-
         if ignore_z:
-            return fx
+            return torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
 
         z = z() if isinstance(z, nn.Module) else z
         if self.v_method == "add":
@@ -571,7 +572,10 @@ class MaskedVAEViT(MaskedAutoencoderViT):
             super(MaskedVAEViT, self).__init__(**kwargs)
         else:
             super(MaskedVAEViT, self).__init__(**mae_model.kwargs)
-            self.load_state_dict(mae_model.state_dict())
+
+            state_dict = {k: v for k,v in mae_model.state_dict().items()
+                if not k.startswith("norm.")}
+            self.load_state_dict(state_dict, strict=False)
 
         # Replace the normal ModuleList [blocks] with a dictionary mapping from
         # block indices to the blocks, with some of the blocks made variational
@@ -661,6 +665,7 @@ class MaskedVAEViT(MaskedAutoencoderViT):
             else:
                 x = block(x)
 
+        x_before_norm = x
         x = self.norm(x)
         return x, mask, ids_restore
 
