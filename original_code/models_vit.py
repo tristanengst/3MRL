@@ -23,6 +23,8 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
     def __init__(self, global_pool=False, **kwargs):
         super(VisionTransformer, self).__init__(**kwargs)
 
+        self.kwargs = kwargs
+
         self.global_pool = global_pool
         if self.global_pool:
             norm_layer = kwargs['norm_layer']

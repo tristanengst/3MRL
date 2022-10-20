@@ -80,7 +80,8 @@ class AdaIN(nn.Module):
         x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
         z_mean = z_mean.unsqueeze(-1).unsqueeze(-1).expand(*x.shape)
         z_std = z_std.unsqueeze(-1).unsqueeze(-1).expand(*x.shape)
-        return z_mean + x * z_std
+        result = z_mean + x * z_std
+        return result
 
 class VariationalBottleneck(nn.Module):
 

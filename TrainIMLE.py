@@ -19,7 +19,7 @@ from FastLinearProbe import fast_linear_probe
 from Models import *
 from Utils import *
 
-def model_folder(args, make_folder=True):
+def model_folder(args, make_folder=False):
     """Returns the folder to which to save a model built with [args]."""
     data = os.path.basename(os.path.dirname(args.data_tr.strip("/"))).strip("/")
     v_spec = "_".join(args.v_spec)
@@ -108,8 +108,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                 z = {"mask_noise": mask_noise_} | latents
                 with torch.cuda.amp.autocast():
                     losses = model(x, z, mask_ratio=args.mask_ratio,
-                        reduction="batch",
-                        ignore_z=True)
+                        reduction="batch")
                 _, idxs = torch.min(losses.view(bs, args.sp), dim=1)
 
                 new_codes = z["latents"]
@@ -125,8 +124,8 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                     ll_old_mean = torch.mean(least_losses[old_finite_idxs])
                     
                     least_losses[start:stop][change_idxs] = losses[change_idxs]
-                
                     ll_new_mean = torch.mean(least_losses[old_finite_idxs])
+                                    
                     wandb.log({"pretrain/epoch": epoch,
                         "sampling/loss_mean": ll_new_mean,
                         "sampling/loss_delta": ll_new_mean - ll_old_mean, 
@@ -199,7 +198,15 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
         else:
             return total_loss.item() / (len(dataset))
 
-    probe_acc = 0 # fast_linear_probe(model, data_tr, data_val, args, ignore_z=ignore_z)
+    tqdm.write(f"---- VALIDATION | ignore_z [{bool(ignore_z)}] ----")
+    if args.fast_linear_probe:
+        classes = torch.linspace(0, len(data_tr.classes) - 1, args.val_n_way)
+        classes = [data_tr.classes[int(c.item())] for c in classes]
+        probe_acc = fast_linear_probe(model, data_tr, data_val, args,   
+            ignore_z=ignore_z,
+            classes=classes)
+    else:
+        probe_acc = -1
 
     vae_loss_te = get_reconstruction_images_loss(model,
         Subset(data_val, indices=random.sample(range(len(data_val)), k=512)),
@@ -262,6 +269,8 @@ def get_args(args=None):
         help="Number of latents per example for logging losses")
     P.add_argument("--z_per_ex_vis", default=8, type=int,
         help="Number of latents per example for logging images")
+    P.add_argument("--fast_linear_probe", default=0, choices=[0, 1], type=int,
+        help="Whether to do fast linear probing each validation")
     
 
     # Logging arguments
@@ -325,17 +334,18 @@ def get_args(args=None):
         help="Whether to global pool in linear probing")
     P.add_argument("--probe_bs", type=int, default=128,
         help="Linear probe training batch size")
-    P.add_argument("--probe_bs_val", type=int, default=2048,
+    P.add_argument("--probe_bs_val", type=int, default=256,
         help="Linear probe test/data gathering batch size")
-    P.add_argument("--probe_ex_tr", type=int, default=16384,
-        help="Number of linear probe training examples")
-    P.add_argument("--probe_ex_val", type=int, default=16384,
-        help="Number of linear probe test examples")
+    P.add_argument("--val_n_way", type=int, default=10,
+        help="Number of classes in probe/finetune data")
+    P.add_argument("--val_n_shot", type=int, default=1000,
+        help="Number of examples per class in probe/finetune data")
     P.add_argument("--probe_lr", type=float, default=1e-3,
         help="Linear probe base learning rate")
-    P.add_argument("--probe_epochs", type=int, default=100,
+    P.add_argument("--probe_epochs", type=int, default=20,
         help="Linear probe number of epochs")
-
+    P.add_argument("--probe_eval_iter", type=int, default=-1,
+        help="Number of epochs between validation")
 
     # Hardware arguments
     P.add_argument("--gpus", nargs="+", default=[0, 1], type=int,
@@ -416,7 +426,7 @@ if __name__ == "__main__":
         results["images/pretrain_train"] = wandb.Image(results["images/pretrain_train"])
         results["images/pretrain_test"] = wandb.Image(results["images/pretrain_test"])
         wandb.log(results | {"pretrain/epoch": 0, "pretrain/step": 0})
-        tqdm.write(f"Epoch {0:4}/{args.epochs} | pretrain/loss_te {results['pretrain/loss_te']} | fast_linear_probe/acc_te {results['fast_linear_probe/acc_te']}")
+        tqdm.write(f"Epoch {0:4}/{args.epochs} | pretrain/loss_te {results['pretrain/loss_te']:.5f} | fast_linear_probe/acc_te {results['fast_linear_probe/acc_te']:.5f}")
 
     scaler = torch.cuda.amp.GradScaler()
     log_iter = max(1, int(args.epochs * args.ipe / 10000))
@@ -484,16 +494,17 @@ if __name__ == "__main__":
                 "pretrain/lr": scheduler.get_lr()[0],
                 "pretrain/epoch": epoch+1}
 
-            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5e} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']} | pretrain/loss_te {data_to_log['pretrain/loss_te']} | fast_linear_probe/acc_te {data_to_log['fast_linear_probe/acc_te']}")
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5e} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']:.5f} | pretrain/loss_te {data_to_log['pretrain/loss_te']:.5f} | fast_linear_probe/acc_te {data_to_log['fast_linear_probe/acc_te']:.5f}")
         else:
             data_to_log = {"loss/pretrain": loss.item(),
                 "pretrain/lr": scheduler.get_lr()[0],
                 "pretrain/epoch": epoch+1}
-            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5e} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']} | fast_linear_probe/acc_te {data_to_log['fast_linear_probe/acc_te']}")
+            tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | pretrain/lr {scheduler.get_lr()[0]:.5e} | pretrain/loss_tr {data_to_log['pretrain/loss_tr']:.5f} | fast_linear_probe/acc_te {data_to_log['fast_linear_probe/acc_te']:.5f}")
         
         wandb.log(data_to_log | {"pretrain/step": cur_step})
         
-        if epoch % args.save_iter == 0 and args.save_iter > 0:    
+        if epoch % args.save_iter == 0 and args.save_iter > 0:
+            conditional_safe_make_directory(f"{save_dir}")
             torch.save({"model": de_dataparallel(model).cpu().state_dict(),
                 "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
                 "idx2v_method": de_dataparallel(model).idx2v_method,

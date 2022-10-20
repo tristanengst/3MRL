@@ -1,3 +1,5 @@
+from collections import defaultdict
+from copy import deepcopy
 import re
 
 from torch.utils.data import DataLoader, Subset
@@ -88,44 +90,74 @@ def data_path_to_loader(data_path, transform, distributed=False,
 class XYDataset(Dataset):
     """A simple dataset returning examples of the form (transform(x), y)."""
 
-    def __init__(self, data, transform=transforms.ToTensor(), normalize=False):
+    def __init__(self, data, transform=None, target_transform=None, 
+        normalize=False):
         """Args:
         data        -- a sequence of (x,y) pairs
         transform   -- the transform to apply to each returned x-value
         """
         super(XYDataset, self).__init__()
-        self.transform = transform
         self.data = data
-
+        self.transform = transform
+        self.target_transform = target_transform
         self.normalize = normalize
+        
         if self.normalize:
             means, stds = get_image_channel_means_stds(XYDataset(self.data))
             self.transform = transforms.Compose([transform,
                 transforms.Normalize(means, stds, inplace=True)])
 
         if hasattr(self.data, "classes"):
-            self.classes = self.data.classes
-        elif hasattr(self.data, "class_to_idx"):
-            print(self.data.targets)
+            self.classes = deepcopy(self.data.classes)
+        if hasattr(self.data, "class_to_idx"):
             self.classes = list(self.data.class_to_idx.keys())
-            assert len(self.classes) == 1000, len(self.classes)
-        else:
-            raise NotImplementedError()
+            self.class_to_idx = deepcopy(self.data.class_to_idx)
 
     def __len__(self): return len(self.data)
 
     def __getitem__(self, idx):
-        image, label = self.data[idx]
-        return self.transform(image), label
+        x, y = self.data[idx]
+        x = x if self.transform is None else self.transform(x)
+        y = y if self.target_transform is None else self.target_transform(y)
+        return x,y
 
-def get_fewshot_dataset(dataset, args):
-    """Returns a Subset of [dataset] giving a k-shot n-way task.
+def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None):
+    """Returns a Subset of [dataset] giving a n-shot n-way task.
 
     Args:
     dataset -- ImageFolder-like dataset
-    args    -- Namespace containing relevant parameters
+    n_way   --
+    n_shot
+    classes --
     """
-    raise NotImplementedError()
+    if classes == "all":
+        classes = set(dataset.targets)
+    elif classes is None:
+        classes = set(random.sample(dataset.classes, k=n_way))
+    else:
+        classes = set(classes)
+
+    classes = {dataset.class_to_idx[c] for c in classes}
+    class2idxs = defaultdict(lambda: [])
+    for idx,t in enumerate(dataset.targets):
+        if t in classes:
+            class2idxs[t].append(idx)
+
+    if not n_shot == "all":
+        try:
+            class2idxs = {c: random.sample(idxs, k=n_shot)
+                for c,idxs in class2idxs.items()}
+        except ValueError as e:
+            class2n_idxs = "\n".join([f"\t{c}: {len(idxs)}"
+                for c,idxs in class2idxs.items()])
+            tqdm.write(f"Likely --val_n_shot asked for more examples than are available | val_n_shot {n_shot} | class to num idxs: {class2n_idxs}")
+            raise e
+  
+    indices = flatten([idxs for idxs in class2idxs.values()])
+    dataset = Subset(dataset, indices=indices)
+    class2idx = {c: idx for idx,c in enumerate(sorted(classes))}
+    return XYDataset(dataset, target_transform=lambda c: class2idx[c])
+    
 
 def get_image_channel_means_stds(dataset, bs=1024):
     """Returns an (mu, sigma) tuple where [mu] and [sigma] are tensors in which

@@ -10,6 +10,7 @@ import torch.nn as nn
 
 import timm.models.vision_transformer
 from timm.models.vision_transformer import PatchEmbed, Block
+from original_code.models_vit import VisionTransformer
 
 from original_code.util import pos_embed as PE
 
@@ -236,7 +237,7 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             raise NotImplementedError()
 
-    def forward(self, x, z, mask_ratio=0.75, reduction="mean", return_all=False):
+    def forward(self, x, z=None, mask_ratio=0.75, reduction="mean", return_all=False):
         """
         Args:
         x           -- BSxCxHxW tensor of images to encode
@@ -274,6 +275,14 @@ class MaskedAutoencoderViT(nn.Module):
             return {"mask_noise": mask_noise_shape,
                 "mask_noise_type": "uniform",
                 "latents": None}
+
+class VisionTransformerBackbone(VisionTransformer):
+
+    def __init__(self, *args, **kwargs):
+        super(VisionTransformerBackbone, self).__init__(*args, **kwargs)
+
+    def forward(self, *args, **kwargs):
+        return super().forward_features(*args, **kwargs)
 
 def parse_variational_spec(args):
     """Returns args.v_spec as a dictionary mapping transformer block indices to
