@@ -581,10 +581,7 @@ class MaskedVAEViT(MaskedAutoencoderViT):
             super(MaskedVAEViT, self).__init__(**kwargs)
         else:
             super(MaskedVAEViT, self).__init__(**mae_model.kwargs)
-
-            state_dict = {k: v for k,v in mae_model.state_dict().items()
-                if not k.startswith("norm.")}
-            self.load_state_dict(state_dict, strict=False)
+            self.load_state_dict(mae_model.state_dict(), strict=False)
 
         # Replace the normal ModuleList [blocks] with a dictionary mapping from
         # block indices to the blocks, with some of the blocks made variational

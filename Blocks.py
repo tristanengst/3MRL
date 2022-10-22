@@ -59,7 +59,7 @@ class AdaIN(nn.Module):
     def __init__(self, c, epsilon=1e-6, act_type="gelu"):
         super(AdaIN, self).__init__()
         self.register_buffer("epsilon", torch.tensor(epsilon))
-        self.mapping_net = MLP(in_dim=512,
+        self.mapping_net_pretrain_z = MLP(in_dim=512,
             h_dim=512,
             layers=8,
             out_dim=c * 2,
@@ -73,7 +73,7 @@ class AdaIN(nn.Module):
         x   -- image features
         z   -- latent codes
         """
-        z = self.mapping_net(z)
+        z = self.mapping_net_pretrain_z(z)
         z_mean = z[:, 0]
         z_std = z[:, 1]
 

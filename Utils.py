@@ -1,8 +1,12 @@
 import argparse
+from collections import OrderedDict
 import io
 import matplotlib
 from ApexUtils import *
 from torchvision.transforms import functional as tv_functional
+
+from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
+
 
 # I don't think this does anything because we don't have convolutions, but it
 # probably can't hurt
@@ -87,3 +91,57 @@ def images_to_pil_image(images):
     buf.seek(0)
     plt.close("all")
     return Image.open(buf)
+
+
+
+def scheduler_to_lrs(s):
+    """Returns a mapping from parameter group names to their current learning
+    rate for scheduler [s]. If the parameter group is unnamed, 
+    """
+    groups = [g["name"] if "name" in g else f"group_{idx}"
+            for idx,g in enumerate(s.optimizer.param_groups)]
+    lrs = [g["lr"] for g in s.optimizer.param_groups]
+    return OrderedDict({g: lr for g,lr in zip(groups, lrs)})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
