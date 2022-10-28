@@ -339,6 +339,7 @@ def get_args(args=None):
 
     args = P.parse_args() if args is None else P.parse_args(args)
     args.uid = wandb.util.generate_id() if args.job_id is None else args.job_id
+    args.save_folder = args.save_folder.strip("/")
 
     if len(args.v_spec) == 0:
         tqdm.write(f"WARNING: empty --v_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
@@ -358,7 +359,7 @@ if __name__ == "__main__":
     ############################################################################
     if args.resume is None:
         wandb.init(anonymous="allow", id=args.uid, config=args,
-            mode=args.wandb, project="URSA",
+            mode=args.wandb, project="3MRL",
             name=os.path.basename(model_folder(args)))
         
         # Instantiate the MAE model we're finetuning
