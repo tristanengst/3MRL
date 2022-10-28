@@ -4,6 +4,7 @@ import io
 import matplotlib
 from ApexUtils import *
 from torchvision.transforms import functional as tv_functional
+import wandb
 
 from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
@@ -92,8 +93,6 @@ def images_to_pil_image(images):
     plt.close("all")
     return Image.open(buf)
 
-
-
 def scheduler_to_lrs(s):
     """Returns a mapping from parameter group names to their current learning
     rate for scheduler [s]. If the parameter group is unnamed, 
@@ -103,19 +102,36 @@ def scheduler_to_lrs(s):
     lrs = [g["lr"] for g in s.optimizer.param_groups]
     return OrderedDict({g: lr for g,lr in zip(groups, lrs)})
 
+class KOrKMinusOne:
+    """Class for maintaining a condition on data [idxs] in which for natural
+    number [k], each element has been returned from the pop() method either [k]
+    or [k-1] times, regardless of the number of calls to pop().
 
+    WARNING: This class is not thread-safe.
 
+    Args:
+    idxs    -- list of data points to return, meant to just be numbers
+    shuffle -- whether or not to shuffle the order in which elements of [idx]
+                are returned, while maintaining the condition
+    """
+    def __init__(self, idxs, shuffle=False):   
+        self.shuffle = shuffle
+        self.idxs = random.sample(idxs, k=len(idxs)) if shuffle else idxs
+        self.counter = 0
 
+    def pop(self):
+        if self.counter == len(self.idxs):
+            self.counter = 0
+            if self.shuffle:
+                self.idxs = random.sample(self.idxs, k=len(self.idxs))
+            else:
+                self.idxs = self.idxs
 
+        result = self.idxs[self.counter]
+        self.counter += 1
+        return result
 
-
-
-
-
-
-
-
-
+    def pop_k(self, k): return [self.pop() for _ in range(k)]
 
 
 

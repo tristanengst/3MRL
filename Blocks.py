@@ -6,6 +6,8 @@ def get_act(act_type):
     """Returns an activation function of type [act_type]."""
     if act_type == "gelu":
         return nn.GELU()
+    elif act_type == "leakyrelu":
+        return nn.LeakyReLU()
     else:
         raise NotImplementedError(f"Unknown activation '{act_type}'")
 
@@ -59,6 +61,7 @@ class AdaIN(nn.Module):
     def __init__(self, c, epsilon=1e-6, act_type="gelu"):
         super(AdaIN, self).__init__()
         self.register_buffer("epsilon", torch.tensor(epsilon))
+        self.c = c
         self.mapping_net_pretrain_z = MLP(in_dim=512,
             h_dim=512,
             layers=8,
@@ -74,12 +77,12 @@ class AdaIN(nn.Module):
         z   -- latent codes
         """
         z = self.mapping_net_pretrain_z(z)
-        z_mean = z[:, 0]
-        z_std = z[:, 1]
+        z_mean = z[:, :self.c]
+        z_std = z[:, self.c:]
 
         x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
-        z_mean = z_mean.unsqueeze(-1).unsqueeze(-1).expand(*x.shape)
-        z_std = z_std.unsqueeze(-1).unsqueeze(-1).expand(*x.shape)
+        z_mean = z_mean.unsqueeze(1).expand(*x.shape)
+        z_std = z_std.unsqueeze(1).expand(*x.shape)
         result = z_mean + x * z_std
         return result
 

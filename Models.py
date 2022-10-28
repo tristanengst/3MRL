@@ -210,7 +210,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = x[:, 1:, :]
         return x
 
-    def forward_loss(self, imgs, pred, mask, reduction="mean"):
+    def forward_loss(self, imgs, pred, mask, reduction="mean", mask_ratio=1):
         """
         imgs: [N, 3, H, W]
         pred: [N, L, p*p*3]
@@ -233,7 +233,7 @@ class MaskedAutoencoderViT(nn.Module):
         if reduction == "mean":
             return (loss.sum() / mask.sum()).unsqueeze(0)  # The 0-1ness of [mask] makes this not dependent on batch size
         elif reduction == "batch":
-            return torch.mean(loss, axis=1)
+            return torch.mean(loss, axis=1) / mask_ratio
         else:
             raise NotImplementedError()
 
@@ -243,17 +243,18 @@ class MaskedAutoencoderViT(nn.Module):
         x           -- BSxCxHxW tensor of images to encode
         mask_ratio  -- mask ratio
         """
+        latent, mask, ids_restore = self.forward_encoder(x, mask_ratio)
+        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+        loss = self.forward_loss(x, pred, mask,
+            reduction=reduction,
+            mask_ratio=mask_ratio)
+        
         if return_all:
-            latent, mask, ids_restore = self.forward_encoder(x, mask_ratio)
-            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-            loss = self.forward_loss(x, pred, mask, reduction=reduction)
             pred, mask = restore_model_outputs(pred, mask, self.patch_embed,
                 self.unpatchify)
             return loss, pred, mask
         else:
-            latent, mask, ids_restore = self.forward_encoder(x, mask_ratio)
-            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-            return self.forward_loss(x, pred, mask, reduction=reduction)
+            return loss
 
     def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
         """Returns the latent specification for the network. Requires that the
@@ -295,19 +296,6 @@ def parse_variational_spec(args):
             return s
         elif s.startswith("AdaIN"):
             return AdaIN()
-        elif s.startswith("bottleneck_add"):
-            if "base" in args.arch:
-                return VariationalBottleneck(
-                    encoder_layers=args.encoder_layers,
-                    encoder_h_dim=args.encoder_h_dim,
-                    h_dim=args.h_dim,
-                    decoder_layers=args.decoder_layers,
-                    decoder_h_dim=args.decoder_h_dim,
-                    decoder_out_dim=768,
-                    act_type=args.act_type,
-                    normalize_z=args.normalize_z)
-            else:
-                raise NotImplementedError()
         elif s.startswith("adain"):
             if "base" in args.arch:
                 return AdaIN(c=768, act_type=args.act_type)
@@ -687,17 +675,19 @@ class MaskedVAEViT(MaskedAutoencoderViT):
         reduction   -- reduction applied to returned loss
         return_all  -- whether to return a (loss, images, masks) tuple or loss
         """
+        latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio,
+            ignore_z=ignore_z)
+        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+        loss = self.forward_loss(x, pred, mask,
+            reduction=reduction,
+            mask_ratio=mask_ratio)
+        
         if return_all:
-            latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio, ignore_z=ignore_z)
-            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-            loss = self.forward_loss(x, pred, mask, reduction=reduction)
             pred, mask = restore_model_outputs(pred, mask, self.patch_embed,
                 self.unpatchify)
             return loss, pred, mask
         else:
-            latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio, ignore_z=ignore_z)
-            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-            return self.forward_loss(x, pred, mask, reduction=reduction)
+            return loss
 
 def restore_model_outputs(pred, mask, patch_embed, unpatchify):
     """Returns a (pred, mask) tuple after modifying each to be viewable.
