@@ -225,9 +225,11 @@ def validate(model, data_tr, data_val, latent_spec, args):
                         ignore_z=args.ignore_z)
 
                 total_loss += (loss.mean() * len(x)).detach()
-                images.append(de_normalize(x).cpu())
-                preds.append(pred.cpu())
-                masks.append(mask.cpu())
+
+                if return_images:
+                    images.append(de_normalize(x).cpu())
+                    preds.append(pred.cpu())
+                    masks.append(mask.cpu())
 
         if return_images:
             images = torch.cat(images, dim=0)
