@@ -1,5 +1,6 @@
 import argparse
 from collections import OrderedDict
+from copy import deepcopy
 import io
 import matplotlib
 from ApexUtils import *
@@ -15,9 +16,6 @@ torch.backends.cudnn.benchmark = True
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 plt.rcParams["savefig.bbox"] = "tight"
-
-project_dir = f"{os.path.dirname(__file__)}"
-data_dir = f"{project_dir}/data"
 
 def argparse_file_type(f):
     """Returns [f] if the file exists, else raises an ArgumentType error."""
@@ -114,16 +112,25 @@ class KOrKMinusOne:
     shuffle -- whether or not to shuffle the order in which elements of [idx]
                 are returned, while maintaining the condition
     """
-    def __init__(self, idxs, shuffle=False):   
+    def __init__(self, idxs, shuffle=True, seed=0):   
         self.shuffle = shuffle
-        self.idxs = random.sample(idxs, k=len(idxs)) if shuffle else idxs
         self.counter = 0
+        self.num_resets = 0
+        self.seed = seed
+
+        if shuffle:
+            self.idxs = seeded_sample(idxs, k=len(idxs), seed=seed)
+        else:
+            self.idxs = idxs
 
     def pop(self):
         if self.counter == len(self.idxs):
             self.counter = 0
+            self.num_resets += 1
             if self.shuffle:
-                self.idxs = random.sample(self.idxs, k=len(self.idxs))
+                self.idxs = seeded_sample(self.idxs,
+                    k=len(self.idxs),
+                    seed=self.seed + self.num_resets)
             else:
                 self.idxs = self.idxs
 
@@ -133,6 +140,194 @@ class KOrKMinusOne:
 
     def pop_k(self, k): return [self.pop() for _ in range(k)]
 
+    def state_dict(self): return self.__dict__
+
+    def __str__(self): return f"KOrKMinusOne [shuffle {self.shuffle} | counter {self.counter} | num_resets {self.num_resets} | seed {self.seed} | num_idxs {len(self.idxs)}]"
+
+    @staticmethod
+    def from_state_dict(state_dict):
+        kkm = KOrKMinusOne([])
+        kkm.__dict__.update(state_dict)
+        return kkm
+
+
+def seeded_sample(select_from, k=-1, seed=0):
+    """Returns [k] items sampled without replacement from [select_from] with
+    seed [seed], without changing the internal seed of the program. This
+    explicitly ensures reproducability.
+    """
+    state = random.getstate()
+    random.seed(seed)
+    result = random.sample(select_from, k=k)
+    random.setstate(state)
+    return result
+
+import math
+import torch
+from torch.optim.lr_scheduler import _LRScheduler
+
+class LinearRampScheduler(_LRScheduler):
+    """Scheduler giving a linear ramp followed by a constant learning rate.
+
+    This scheduler will be the only thing to control the learning rate when in
+    use, and the learning rate in the optimizer is ignored. This is a much more
+    convenient API.
+
+    Args:
+    optimizer       -- wrapped optimizer
+    warmup_steps    -- number of warmup steps for all parameters
+    last_epoch      -- last epoch (step)
+    min_lr          -- minimum learning rate for all parameters
+    pg2base_lrs     -- dictionary mapping param group names in [optimizer] to
+                        their post-ramp learning rates. If a float, the same
+                        value is used for all parameters.
+    pg2start_step   -- dictionary mapping each param group to the epoch on which
+                        its learning rate can start being non-zero
+    """
+    def __init__(self, optimizer, warmup_steps=0, last_epoch=-1, min_lr=0,
+        pg2base_lrs=1e-3, pg2start_step=None, verbose=True):
+
+        self.global_step = last_epoch
+        self.min_lr = min_lr
+        self.warmup_steps = warmup_steps
+
+        # Index of step on which a parameter group can start having a non-zero
+        # learning
+        if pg2start_step is None:
+            self.pg2start_step = {p["name"]: 0 for p in optimizer.param_groups}
+        else:
+            self.pg2start_step = pg2start_step
+
+        # Number of steps for each parameter group so far
+        if last_epoch == -1:
+            self.pg2step = {pg["name"]: 1 for pg in optimizer.param_groups}
+        else:
+            self.pg2step = {pg["name"]: max(1, (last_epoch - pg2start_step[pg["name"]]))
+                for pg in optimizer.param_groups}
+
+
+        # Amount to increase the learning rate of each parameter group per step
+        # during its ramp
+        if isinstance(pg2base_lrs, float):
+            self.lr_inc_per_step = {pg["name"]: pg2base_lrs - min_lr
+                for pg in optimizer.param_groups}
+        elif isinstance(pg2base_lrs, dict):
+            self.lr_inc_per_step = {pg["name"]: pg2base_lrs[pg["name"]] - min_lr
+                for pg in optimizer.param_groups}
+        else:
+            raise NotImplementedError()
+
+        self.lr_inc_per_step = {pgn: inc / warmup_steps
+            for pgn,inc in self.lr_inc_per_step.items()}
+
+        super(LinearRampScheduler, self).__init__(optimizer,
+            last_epoch=-1, # Prevent the base class from being weird
+            verbose=verbose)
+
+    def get_lr(self): return {pg["name"]: pg["lr"] for pg in self.optimizer.param_groups}
+
+    def step(self):
+        for pg in self.optimizer.param_groups:
+            if self.global_step < self.pg2start_step[pg["name"]]:     
+                pg["lr"] = 0
+            else:
+                if self.pg2step[pg["name"]] <= self.warmup_steps:
+                    pg["lr"] = self.pg2step[pg["name"]] * self.lr_inc_per_step[pg["name"]] + self.min_lr
+                    self.pg2step[pg["name"]] += 1
+                else:
+                    pass
+
+        self.global_step += 1
+
+    def __str__(self): return f"LinearRampScheduler [global_step {self.global_step} | min_lr {self.min_lr} | warmup_steps {self.warmup_steps}\n\tpg2step {self.pg2step} | pg2start_step {self.pg2start_step}\n\tlr_inc_per_step {self.lr_inc_per_step}\n\tlrs {self.get_lr()}]"
+
+class CosineAnnealingWarmupRestartsMultipleParamGroups(_LRScheduler):
+    """
+        optimizer (Optimizer): Wrapped optimizer.
+        first_cycle_steps (int): First cycle step size.
+        cycle_mult(float): Cycle steps magnification. Default: -1.
+        max_lr(float): First cycle's max learning rate. Default: 0.1.
+        min_lr(float): Min learning rate. Default: 0.001.
+        warmup_steps(int): Linear warmup step size. Default: 0.
+        gamma(float): Decrease rate of max learning rate by cycle. Default: 1.
+        last_epoch (int): The index of last epoch. Default: -1.
+    """
+    
+    def __init__(self,
+                 optimizer : torch.optim.Optimizer,
+                 first_cycle_steps : int,
+                 cycle_mult : float = 1.,
+                #  max_lr : float = 0.1,
+                 min_lr : float = 0.001,
+                 warmup_steps : int = 0,
+                 gamma : float = 1.,
+                 last_epoch : int = -1
+        ):
+        assert warmup_steps < first_cycle_steps
+        
+        self.first_cycle_steps = first_cycle_steps # first cycle step size
+        self.cycle_mult = cycle_mult # cycle steps magnification
+        # self.base_max_lr = max_lr # first max learning rate
+        # self.max_lr = max_lr # max learning rate in the current cycle
+        self.min_lr = min_lr # min learning rate
+        self.warmup_steps = warmup_steps # warmup step size
+        self.gamma = gamma # decrease rate of max learning rate by cycle
+        
+        self.cur_cycle_steps = first_cycle_steps # first cycle step size
+        self.cycle = 0 # cycle count
+        self.step_in_cycle = last_epoch # step size of the current cycle
+
+        self.base_max_lrs = [pg['lr'] for pg in optimizer.param_groups]
+        self.max_lrs = deepcopy(self.base_max_lrs)
+        
+        super(CosineAnnealingWarmupRestartsMultipleParamGroups, self).__init__(optimizer, last_epoch)
+        
+        # set learning rate min_lr
+        self.init_lr()
+    
+    def init_lr(self):
+        self.base_lrs = []
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = self.min_lr
+            self.base_lrs.append(self.min_lr)
+    
+    def get_lr(self):
+        if self.step_in_cycle == -1:
+            return self.base_lrs
+        elif self.step_in_cycle < self.warmup_steps:
+            return [(max_lr - base_lr)*self.step_in_cycle / self.warmup_steps + base_lr for base_lr,max_lr in zip(self.base_lrs, self.max_lrs)]
+        else:
+            return [base_lr + (max_lr - base_lr) \
+                    * (1 + math.cos(math.pi * (self.step_in_cycle-self.warmup_steps) \
+                                    / (self.cur_cycle_steps - self.warmup_steps))) / 2
+                    for base_lr,max_lr in zip(self.base_lrs, self.max_lrs)]
+
+    def step(self, epoch=None):
+        if epoch is None:
+            epoch = self.last_epoch + 1
+            self.step_in_cycle = self.step_in_cycle + 1
+            if self.step_in_cycle >= self.cur_cycle_steps:
+                self.cycle += 1
+                self.step_in_cycle = self.step_in_cycle - self.cur_cycle_steps
+                self.cur_cycle_steps = int((self.cur_cycle_steps - self.warmup_steps) * self.cycle_mult) + self.warmup_steps
+        else:
+            if epoch >= self.first_cycle_steps:
+                if self.cycle_mult == 1.:
+                    self.step_in_cycle = epoch % self.first_cycle_steps
+                    self.cycle = epoch // self.first_cycle_steps
+                else:
+                    n = int(math.log((epoch / self.first_cycle_steps * (self.cycle_mult - 1) + 1), self.cycle_mult))
+                    self.cycle = n
+                    self.step_in_cycle = epoch - int(self.first_cycle_steps * (self.cycle_mult ** n - 1) / (self.cycle_mult - 1))
+                    self.cur_cycle_steps = self.first_cycle_steps * self.cycle_mult ** (n)
+            else:
+                self.cur_cycle_steps = self.first_cycle_steps
+                self.step_in_cycle = epoch
+                
+        self.max_lrs = [base_max_lr * (self.gamma ** self.cycle) for base_max_lr in self.base_max_lrs]
+        self.last_epoch = math.floor(epoch)
+        for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
+            param_group['lr'] = lr
 
 
 

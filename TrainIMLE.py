@@ -3,7 +3,7 @@ from itertools import chain
 from tqdm import tqdm
 import wandb
 
-from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
+# from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
 import torch
 from torch.optim import AdamW
@@ -29,7 +29,7 @@ def model_folder(args, make_folder=False):
     """
     data = os.path.basename(os.path.dirname(args.data_tr.strip("/"))).strip("/")
     v_spec = "_".join(args.v_spec)
-    folder = f"{args.save_folder}/{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{tuple_to_str(args.ns)}-v_spec{v_spec}-{args.uid}{suffix_str(args)}"
+    folder = f"{args.save_folder}/{data}-{args.arch}-bs{args.ex_per_epoch}-epochs{args.epochs}-headstartz{args.headstart_z}-ipe{args.ipe}-lr{args.lr:.2e}-lrz{args.lr_z}-nramp{args.n_ramp}-ns{args.ns}-scheduler{args.scheduler}-vspec{v_spec}-{args.uid}{suffix_str(args)}"
 
     if make_folder:
         conditional_safe_make_directory(folder)
@@ -81,7 +81,7 @@ class ImageLatentDataset(Dataset):
                 loss = model(x, z,
                     mask_ratio=args.mask_ratio,
                     ignore_z=args.ignore_z)
-        xz = [self.__getitem__(idx) for idx in range(min(args.ex_for_eval_tr, len(self)))]
+        xz = [self.__getitem__(idx) for idx in range(min(args.ex_for_vis_tr, len(self)))]
         with torch.no_grad():
             with torch.cuda.amp.autocast():
                 x,z = ImageLatentDataset.collate_fn(xz)
@@ -252,20 +252,23 @@ def validate(model, data_tr, data_val, latent_spec, args):
     else:
         probe_acc = -1
 
+    idxs = seeded_sample(range(len(data_val)),
+        k=args.ex_for_mse_loss,
+        seed=args.seed)
     vae_loss_te = get_reconstruction_images_loss(model,
-        Subset(data_val, indices=random.sample(range(len(data_val)), k=512)),
+        Subset(data_val, indices=idxs),
         latent_spec, args,
         return_images=False,
         z_per_ex=args.z_per_ex_loss)
 
-    idxs_tr = torch.linspace(0, len(data_tr) - 1, args.ex_for_eval_tr)
+    idxs_tr = torch.linspace(0, len(data_tr) - 1, args.ex_for_vis_tr)
     _, images_tr = get_reconstruction_images_loss(model,
         Subset(data_tr, [int(idx) for idx in idxs_tr.tolist()]),
         latent_spec, args,
         return_images=True,
         z_per_ex=args.z_per_ex_vis)
 
-    idxs_te = torch.linspace(0, len(data_val) - 1, args.ex_for_eval_te)
+    idxs_te = torch.linspace(0, len(data_val) - 1, args.ex_for_vis_te)
     _, images_te = get_reconstruction_images_loss(model,
         Subset(data_val, [int(idx) for idx in idxs_te.tolist()]),
         latent_spec, args,
@@ -281,7 +284,7 @@ def validate(model, data_tr, data_val, latent_spec, args):
 
 def save_state(model, optimizer, scheduler, kkm, epoch, args):
     """Saves input training utilities."""
-    conditional_safe_make_directory(f"{model_folder(args)}")
+    conditional_safe_make_directory(f"{model_folder(args, make_folder=True)}")
     torch.save({"model": de_dataparallel(model).cpu().state_dict(),
         "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
         "idx2v_method": de_dataparallel(model).idx2v_method,
@@ -289,10 +292,10 @@ def save_state(model, optimizer, scheduler, kkm, epoch, args):
         "scheduler": scheduler,
         "args": args,
         "last_epoch": epoch,
-        "kkm": kkm},
-        f"{model_folder(args)}/{epoch+1}.pt")
+        "kkm": kkm.state_dict()},
+        f"{model_folder(args)}/{epoch}.pt")
     model = model.to(device)
-    tqdm.write(f"Saved training state to {model_folder(args)}/{epoch+1}.pt")
+    tqdm.write(f"Saved training state to {model_folder(args)}/{epoch}.pt")
 
 def print_and_log_results(data_to_log, args, epoch=0, cur_step=0):
     """Prints and logs results [results].
@@ -314,8 +317,7 @@ def print_and_log_results(data_to_log, args, epoch=0, cur_step=0):
 
     wandb.log(data_to_log | {"pretrain/step": cur_step, "epoch": epoch})
 
-    stage = "pretrain_z" if epoch < args.epochs_z else "pretrain"
-    s = f"Epoch {epoch+1:4}/{args.epochs + args.epochs_z} ({stage}) -- Step {cur_step:6}/{args.ipe * (args.epochs + args.epochs_z)}"
+    s = f"Epoch {epoch+1:4}/{args.epochs} -- Step {cur_step:6}/{args.ipe * args.epochs}"
     for k,v in sorted(data_to_log.items()):
         s += f" | {k} {v:.3e}".replace("_params", "") if "lr" in k else ""
     for k,v in sorted(data_to_log.items(), reverse=True):
@@ -336,6 +338,7 @@ def get_args(args=None):
     P = add_linear_probe_args(P)
     P = add_train_imle_args(P)
     P = add_util_args(P)
+    P = add_eval_imle_args(P)
 
     args = P.parse_args() if args is None else P.parse_args(args)
     args.uid = wandb.util.generate_id() if args.job_id is None else args.job_id
@@ -348,83 +351,177 @@ def get_args(args=None):
     if args.sp > args.ns:
         tqdm.write(f"WARNING: --sp must be at most --ns. Setting --sp to --ns.")
         args.sp = args.ns
+
+    if args.ex_per_epoch // args.mini_bs > args.ipe:
+        raise ValueError(f"Request at least --ex_per_epoch // --mini_bs iterations for --ipe")
+
     return args
+
+def get_initial_training_constructs(args):
+    """
+    """
+    # Instantiate the MAE model we're finetuning
+    if args.arch == "vit_base":
+        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_base_full.pth")["model"]
+        mae = mae_vit_base_patch16(norm_pix_loss=args.norm_pix_loss)
+    elif args.arch == "vit_large":
+        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_large_full.pth")["model"]
+        mae = mae_vit_large_patch16(norm_pix_loss=args.norm_pix_loss)
+    else:
+        raise NotImplementedError()
+    
+    mae.load_state_dict(mae_model_state)
+    model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
+    model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs).to(device)
+    model = nn.DataParallel(model, device_ids=args.gpus).to(device)
+    
+    params_z = [v for p,v in model.named_parameters()
+            if "pretrain_z" in p]
+    params_mae = [v for p,v in model.named_parameters()
+            if not "pretrain_z" in p]
+    optimizer = AdamW([{"params": params_z,
+        "lr": args.lr_z,
+        "initial_lr": 0,
+        "name": "params_z"},
+        {"params": params_mae,
+        "lr": args.lr,
+        "initial_lr": 0,
+        "name": "params_mae"}],
+        betas=(args.beta1, args.beta2),
+        weight_decay=args.wd)
+    
+    return model, optimizer
 
 if __name__ == "__main__":
     args = get_args()
-    pretty_print_args(args)
+    
 
     ############################################################################
     # Load resumed things or instantiate them
     ############################################################################
     if args.resume is None:
+        model, optimizer = get_initial_training_constructs(args)
         wandb.init(anonymous="allow", id=args.uid, config=args,
             mode=args.wandb, project="3MRL",
             name=os.path.basename(model_folder(args)))
-        
-        # Instantiate the MAE model we're finetuning
-        if args.arch == "base_pretrained":
-            mae_model_state = torch.load(f"{project_dir}/mae_checkpoints/mae_pretrain_vit_base_full.pth")["model"]
-            mae = mae_vit_base_patch16(norm_pix_loss=args.norm_pix_loss)
-        elif args.arch == "large_pretrained":
-            mae_model_state = torch.load(f"{project_dir}/mae_checkpoints/mae_pretrain_vit_large_full.pth")["model"]
-            mae = mae_vit_large_patch16(norm_pix_loss=args.norm_pix_loss)
-        else:
-            raise NotImplementedError()
-        
-        mae.load_state_dict(mae_model_state)
-        model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
-        model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs).to(device)
-        model = nn.DataParallel(model, device_ids=args.gpus).to(device)
-        tqdm.write(str(model))
-        
-        # Only add the mapping net parameters initially; we will add the those
-        # of the rest of the model later once these have been trained a bit.
-        params_z = [v for p,v in model.named_parameters()
-                if "pretrain_z" in p]
-        optimizer = AdamW([{"params": params_z,
-            "lr": args.lr_z,
-            "weight_decay": 1e-6,
-            "name": "params_z"}])
-        tqdm.write(f"OPTIMIZER: {optimizer}")
-        
+        kkm = None
+        last_epoch = -1
+        last_step = -1
     else:
-        raise NotImplementedError()
+        resume = torch.load(args.resume)
+        old_args = resume["args"]
 
+        if old_args.uid == args.uid:
+            # Update [args] to be identical to [old_args] except in some cases
+            keep_args = get_arg_names_from_fn(add_hardware_args)
+            keep_args |= get_arg_names_from_fn(add_linear_probe_args)
+            keep_args |= get_arg_names_from_fn(add_eval_imle_args)
+            keep_args |= {"save_folder"}
+            keep_args = {k: v for k,v in vars(args).items() if k in keep_args}
+            args.__dict__.update(vars(old_args))
+            args.__dict__.update(keep_args)
+
+            model, optimizer = get_initial_training_constructs(args)
+            optimizer.load_state_dict(resume["optimizer"])
+            kkm = KOrKMinusOne.from_state_dict(resume["kkm"])
+            wandb.init(id=args.uid, resume="must", mode=args.wandb,
+                project="3MRL", config=args,
+                name=os.path.basename(model_folder(args)))
+        else:
+            args.arch = old_args.arch
+            model, optimizer = get_initial_training_constructs(args)
+            optimizer.load_state_dict(resume["optimizer"])
+            wandb.init(anonymous="allow", id=args.uid, config=args,
+                mode=args.wandb, project="3MRL",
+                name=os.path.basename(model_folder(args)))
+
+        model.load_state_dict(resume["model"], strict=False)
+        model = model.to(device)
+        kkm = KOrKMinusOne.from_state_dict(resume["kkm"])
+        last_epoch = resume["last_epoch"]
+        last_step = last_epoch * args.ipe + args.ipe
+
+    latent_spec = model.module.get_latent_spec(mask_ratio=args.mask_ratio,
+        input_size=args.input_size)
+        
+    pretty_print_args(args)
+    tqdm.write(f"LOG: Will save to {model_folder(args)}")
+    
+    # tqdm.write(f"MODEL\n{model}")
+    tqdm.write(f"OPTIMIZER\n{optimizer}")
+    tqdm.write(f"LATENT_SPEC\n{latent_spec}")
+
+    ############################################################################
+    # Get the data and KKM
+    ############################################################################
     data_tr = data_path_to_dataset(args.data_tr,
         transform=get_train_transforms(args))
     data_val = data_path_to_dataset(args.data_val,
         transform=get_train_transforms(args))
-    tqdm.write(f"TRAINING DATA: {data_tr}")
-    tqdm.write(f"VALIDATION DATA: {data_val}")
-
-    if args.resume is None:
-        kkm = KOrKMinusOne(range(len(data_tr)), shuffle=True)
+    if args.train_n_way == -1:
+        classes = "all"
     else:
-        kkm = kkm
+        classes = torch.linspace(0, len(data_tr.classes) - 1, args.train_n_way)
+        classes = [data_tr.classes[int(c.item())] for c in classes]
+    data_tr = get_fewshot_dataset(data_tr,
+        n_way=args.train_n_way,
+        n_shot=args.train_n_shot,
+        classes=classes,
+        seed=args.seed)
+    data_val = get_fewshot_dataset(data_val,
+        n_way=args.train_n_way,
+        n_shot=args.train_n_shot,
+        classes=classes,
+        seed=args.seed)
+
+    if len(data_val) < args.ex_for_probe:
+        raise ValueError(f"Evaluation data has only {examples}, but {args.ex_for_probe} were requested.")
     
-    latent_spec = model.module.get_latent_spec(mask_ratio=args.mask_ratio,
-        input_size=args.input_size)
-    tqdm.write(f"LOG: Constructed latent shape dictionary: {latent_spec}")
-    
+    if kkm is None:
+        kkm = KOrKMinusOne(range(len(data_tr)), shuffle=True, seed=args.seed)
+
+    tqdm.write(f"TRAINING DATA\n{data_tr}")
+    tqdm.write(f"VALIDATION DATA\n{data_val}")
+    tqdm.write(f"KKM\n{kkm}")
+        
+    ############################################################################
+    # Get the scheduler
+    ############################################################################    
+    if args.scheduler == "linear_ramp_cosine_decay":
+        if args.headstart_z > 0:
+            raise ValueError(f"linear_ramp_cosine_decay scheduler option does not support giving the z parameters a headstart")
+        scheduler = CosineAnnealingWarmupRestartsMultipleParamGroups(optimizer,
+            first_cycle_steps=args.epochs * args.ipe,
+            warmup_steps=args.n_ramp * args.ipe,
+            min_lr=args.min_lr,
+            last_epoch=last_step)
+    elif args.scheduler == "linear_ramp":
+        scheduler = LinearRampScheduler(optimizer,
+            warmup_steps=args.n_ramp * args.ipe,
+            min_lr=args.min_lr,
+            pg2base_lrs={"params_mae": args.lr, "params_z": args.lr_z},
+            pg2start_step={"params_z": 0, "params_mae": args.headstart_z * args.ipe},
+            last_epoch=last_step)
+    else:
+        raise NotImplementedError()
+
+    tqdm.write(f"SCHEDULER\n{scheduler}")
+
 
     ############################################################################
     # Begin training
     ############################################################################        
-    scaler = torch.cuda.amp.GradScaler()
-    log_iter = max(1, int(args.epochs * args.ipe / 10000))
+    scaler = torch.cuda.amp.GradScaler(init_scale=1)
+    log_iter = max(1, int((args.epochs - (last_epoch + 1)) * args.ipe / 10000))
     tqdm.write(f"LOG: Will log every {log_iter} gradient steps")
-    tqdm.write(f"LOG: Will save to {model_folder(args).replace(project_dir, '').strip('/')}")
 
-    for epoch in tqdm(range(0, args.epochs_z +  args.epochs),
+    for epoch in tqdm(range(last_epoch+1, args.epochs),
         desc="TRAINING: Epochs",
         dynamic_ncols=True,
         leave=False):
 
-        ########################################################################
         # Do an initial validation of to see where what we need to improve from
-        ########################################################################
-        if epoch == 0:
+        if epoch == last_epoch + 1:
             data_to_log = validate(model=model,
                 data_tr=data_tr,
                 data_val=data_val,
@@ -432,46 +529,7 @@ if __name__ == "__main__":
                 args=args)
             print_and_log_results(data_to_log, args)
 
-        ########################################################################
-        # Add parameters to the optimizer if they're ready to be optimized. We
-        # need to reset [scaler] too. We copy most of the optimization
-        # parameters from the parameters of the latent code architecture, since
-        # they're good defaults
-        ########################################################################
-        if epoch == args.epochs_z:
-            params_mae = [v for p,v in model.named_parameters()
-                if not "pretrain_z" in p]
-
-            optimizer.param_groups.append(optimizer.param_groups[0] | {
-                "params": params_mae,
-                "lr": args.lr,
-                "name": "params_mae"})
-            tqdm.write(f"UPDATED OPTIMIZER: {optimizer}")
-        else:
-            pass
-        
-        ########################################################################
-        # Get the scheduler for the epoch
-        ########################################################################
-        if epoch < args.epochs_z:
-            scheduler = CosineAnnealingWarmupRestarts(optimizer,
-                first_cycle_steps=args.epochs_z * args.ipe,
-                warmup_steps=args.n_ramp_z * args.ipe,
-                max_lr=args.lr_z,
-                min_lr=args.min_lr_z,
-                last_epoch=-1 if epoch == 0 else epoch * args.ipe - 1)
-        else:
-            stage_epoch = epoch - args.epochs_z
-            scheduler = CosineAnnealingWarmupRestarts(optimizer,
-                first_cycle_steps=args.epochs * args.ipe,
-                warmup_steps=args.n_ramp * args.ipe,
-                max_lr=args.lr,
-                min_lr=args.min_lr,
-                last_epoch=-1 if stage_epoch == 0 else stage_epoch * args.ipe - 1)
-
-        ########################################################################
         # Sample latent codes and create the DataLoader for the epoch
-        ########################################################################
         batch_data_tr = Subset(data_tr, indices=kkm.pop_k(args.ex_per_epoch))
         batch_dataset = get_image_latent_dataset(model, batch_data_tr,
             latent_spec, args, epoch=epoch)
@@ -485,17 +543,13 @@ if __name__ == "__main__":
         num_passes_over_loader = max(1, args.ipe // len(loader))
         batch_loader = chain(*[loader] * num_passes_over_loader)
 
-        ########################################################################
         # Print string signalling start of the epoch's training
-        ########################################################################
-        stage = "pretrain_z" if epoch < args.epochs_z else "pretrain"
         gradient_steps = num_passes_over_loader * len(loader)
-        tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} ({stage}) | gradient steps {gradient_steps} | each example appears {num_passes_over_loader} times")
+        tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | gradient steps {gradient_steps} | each example appears {num_passes_over_loader} times")
 
         ########################################################################
         # Train for one epoch on the data
         ########################################################################
-        
         pre_epoch_results = batch_dataset.get_val_results(model, args=args)
         
         for batch_idx,(x,z) in tqdm(enumerate(batch_loader),
@@ -550,8 +604,9 @@ if __name__ == "__main__":
             "epoch/image_grid": wandb.Image(images_to_pil_image(image_grid)),
             "epoch/loss_start": pre_epoch_results["loss"]})
         
-        if (epoch % args.save_iter == 0
-            or epoch == args.epochs_z + args.epochs - 1):
+        if ((epoch % args.save_iter == 0
+            or epoch == args.epochs - 1)
+            and args.save_iter > -1):
             save_state(model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,

@@ -91,7 +91,7 @@ class XYDataset(Dataset):
     """A simple dataset returning examples of the form (transform(x), y)."""
 
     def __init__(self, data, transform=None, target_transform=None, 
-        normalize=False):
+        normalize=False, classes=None):
         """Args:
         data        -- a sequence of (x,y) pairs
         transform   -- the transform to apply to each returned x-value
@@ -107,11 +107,25 @@ class XYDataset(Dataset):
             self.transform = transforms.Compose([transform,
                 transforms.Normalize(means, stds, inplace=True)])
 
-        if hasattr(self.data, "classes"):
-            self.classes = deepcopy(self.data.classes)
         if hasattr(self.data, "class_to_idx"):
             self.classes = list(self.data.class_to_idx.keys())
             self.class_to_idx = deepcopy(self.data.class_to_idx)
+        else:
+            pass
+
+        if hasattr(self.data, "classes"):
+            self.classes = deepcopy(self.data.classes)
+        elif not classes is None:
+            self.classes = classes
+        else:
+            loader = DataLoader(self.data, batch_size=128, num_workers=8)
+            self.classes = set()
+            for _,y in tqdm(loader,
+                desc="Getting XYDataset class information",
+                leave=False):
+                self.classes |= set(y.tolist())
+            
+            self.classes = list(sorted(self.classes))
 
     def __len__(self): return len(self.data)
 
@@ -121,7 +135,10 @@ class XYDataset(Dataset):
         y = y if self.target_transform is None else self.target_transform(y)
         return x,y
 
-def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None):
+    def __str__(self):
+        return f"XYDataset | num classes {len(self.classes)} | total length {self.__len__()} \n\ttransform \n\t{self.transform}\n\ttarget_transform\n\t{self.target_transform}"
+
+def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None, seed=0):
     """Returns a Subset of [dataset] giving a n-shot n-way task.
 
     Args:
@@ -130,10 +147,15 @@ def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None):
     n_shot
     classes --
     """
-    if classes == "all":
-        classes = set(dataset.targets)
+    use_all_list = ["all", -1]
+    
+    if classes in use_all_list and n_shot in use_all_list:
+        return dataset
+
+    if classes in use_all_list:
+        classes = set(dataset.classes)
     elif classes is None:
-        classes = set(random.sample(dataset.classes, k=n_way))
+        classes = set(seeded_sample(dataset.classes, k=n_way, seed=seed))
     else:
         classes = set(classes)
 
@@ -143,9 +165,9 @@ def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None):
         if t in classes:
             class2idxs[t].append(idx)
 
-    if not n_shot == "all":
+    if not n_shot in use_all_list:
         try:
-            class2idxs = {c: random.sample(idxs, k=n_shot)
+            class2idxs = {c: seeded_sample(idxs, k=n_shot, seed=seed)
                 for c,idxs in class2idxs.items()}
         except ValueError as e:
             class2n_idxs = "\n".join([f"\t{c}: {len(idxs)}"
@@ -156,8 +178,9 @@ def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None):
     indices = flatten([idxs for idxs in class2idxs.values()])
     dataset = Subset(dataset, indices=indices)
     class2idx = {c: idx for idx,c in enumerate(sorted(classes))}
-    return XYDataset(dataset, target_transform=lambda c: class2idx[c])
-    
+    return XYDataset(dataset,
+        target_transform=lambda c: class2idx[c],
+        classes=classes)    
 
 def get_image_channel_means_stds(dataset, bs=1024):
     """Returns an (mu, sigma) tuple where [mu] and [sigma] are tensors in which

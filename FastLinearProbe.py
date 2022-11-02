@@ -112,10 +112,12 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None):
         classes = random.sample(data_tr.classes, k=args.val_n_way)
     data_tr = get_fewshot_dataset(data_tr,
         n_shot=args.val_n_shot,
-        classes=classes)
+        classes=classes,
+        seed=args.seed)
     data_val = get_fewshot_dataset(data_val,
         n_shot="all",
-        classes=classes)
+        classes=classes,
+        seed=args.seed)
 
     data_tr = FeatureDataset(data_tr,
         model=backbone,
@@ -151,7 +153,6 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None):
     scheduler = CosineAnnealingWarmupRestarts(optimizer,
         first_cycle_steps=args.probe_epochs * len(loader_tr),
         warmup_steps=max(1, args.probe_epochs // 10) * len(loader_tr),
-        max_lr=args.probe_lr,
         min_lr=1e-6)
 
     # Train the probe

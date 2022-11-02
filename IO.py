@@ -2,6 +2,13 @@ import argparse
 import os
 from Utils import *
 
+def get_arg_names_from_fn(fn):
+    P = argparse.ArgumentParser()
+    P = fn(P)
+    actions = [a for a in P._actions if isinstance(a, argparse._StoreAction)]
+    return {a.dest for a in actions}
+
+
 def argparse_file_type(x):
     return x if os.path.exists(x) or x.startswith("$") else False
 
@@ -9,10 +16,12 @@ def add_util_args(P):
     P.add_argument("--wandb", choices=["disabled", "online", "offline"], 
         default="online",
         help="Type of W&B logging")
-    P.add_argument("--save_folder", default=f"{project_dir}/models",
+    P.add_argument("--save_folder", default=f"./models",
         help="Folder inside which to save the enclosing folder for the results")
     P.add_argument("--suffix", type=str, default=None,
         help="Optional suffix")
+    P.add_argument("--seed", type=str, default=1701,
+        help="Random seed")
     return P
 
 def add_hardware_args(P):
@@ -25,7 +34,7 @@ def add_hardware_args(P):
 def add_linear_probe_args(P):
     P.add_argument("--global_pool", type=int, default=1, choices=[0, 1],
         help="Whether to global pool in linear probing")
-    P.add_argument("--probe_bs", type=int, default=128,
+    P.add_argument("--probe_bs", type=int, default=16,
         help="Linear probe training batch size")
     P.add_argument("--probe_bs_val", type=int, default=256,
         help="Linear probe test/data gathering batch size")
@@ -35,7 +44,7 @@ def add_linear_probe_args(P):
         help="Number of examples per class in probe/finetune data")
     P.add_argument("--probe_lr", type=float, default=1e-3,
         help="Linear probe base learning rate")
-    P.add_argument("--probe_epochs", type=int, default=20,
+    P.add_argument("--probe_epochs", type=int, default=100,
         help="Linear probe number of epochs")
     P.add_argument("--probe_ignore_z",  type=int, default=1, choices=[0, 1],
         help="Whether to ignore the code in all linear probing")
@@ -43,13 +52,38 @@ def add_linear_probe_args(P):
         help="Evaluate linear probe every PROBE_EVAL_ITER epochs")
     return P
 
+def add_eval_imle_args(P):
+    P.add_argument("--ex_for_mse_loss", type=int, default=512,
+        help="Number of examples for the fast linear probe")
+    P.add_argument("--ex_for_vis_tr", default=8,
+        help="Number of training examples for logging")
+    P.add_argument("--ex_for_vis_te", default=8,
+        help="Number of training examples for logging")
+    P.add_argument("--z_per_ex_loss", default=128, type=int,
+        help="Number of latents per example for logging losses")
+    P.add_argument("--z_per_ex_vis", default=8, type=int,
+        help="Number of latents per example for logging images")
+    P.add_argument("--fast_linear_probe", default=1, choices=[0, 1], type=int,
+        help="Whether to do fast linear probing each validation")
+    P.add_argument("--ex_for_probe", type=int, default=-1,
+        help="Number of examples for the fast linear probe")
+    
+    # Logging arguments
+    P.add_argument("--evals_per_epoch", type=int, default=1,
+        help="Number of evaluations per epoch")
+    P.add_argument("--save_iter", type=int, default=-1,
+        help="Number of epochs between each save")
+    P.add_argument("--log_sampling", choices=[0, 1], type=int, default=1,
+        help="Whether to log sampling data")
+    return P
+
 def add_train_imle_args(P):
     
     # Key arguments
     P.add_argument("--v_spec", nargs="*", default=[],
         help="Specification for making the autoencoder variational")
-    P.add_argument("--arch", choices=["base_pretrained", "large_pretrained"], 
-        default="base_pretrained",
+    P.add_argument("--arch", choices=["vit_base", "vit_large"], 
+        default="vit_base",
         help="Type of ViT model to use")
     P.add_argument("--resume", default=None,
         help="Path to checkpoint to resume")
@@ -63,26 +97,10 @@ def add_train_imle_args(P):
     P.add_argument("--data_val", default="data/imagenet/val.tar", 
         type=argparse_file_type,
         help="String specifying finetuning data")
-    
-    # Evaluation arguments
-    P.add_argument("--ex_for_eval_tr", default=8,
-        help="Number of training examples for logging")
-    P.add_argument("--ex_for_eval_te", default=8,
-        help="Number of training examples for logging")
-    P.add_argument("--z_per_ex_loss", default=128, type=int,
-        help="Number of latents per example for logging losses")
-    P.add_argument("--z_per_ex_vis", default=8, type=int,
-        help="Number of latents per example for logging images")
-    P.add_argument("--fast_linear_probe", default=1, choices=[0, 1], type=int,
-        help="Whether to do fast linear probing each validation")
-    
-    # Logging arguments
-    P.add_argument("--evals_per_epoch", type=int, default=1,
-        help="Number of evaluations per epoch")
-    P.add_argument("--save_iter", type=int, default=1,
-        help="Number of epochs between each save")
-    P.add_argument("--log_sampling", choices=[0, 1], type=int, default=1,
-        help="Whether to log sampling data")
+    P.add_argument("--train_n_way", type=int, default=-1,
+        help="Number of classes in generative modeling data")
+    P.add_argument("--train_n_shot", type=int, default=-1,
+        help="Number of examples per class in generative modeling data")
 
     # Shared training arguments between the MAE architecture and latent codes
     P.add_argument("--ex_per_epoch", type=int, default=512,
@@ -105,6 +123,17 @@ def add_train_imle_args(P):
         help="Size of (cropped) images to feed to the model")
     P.add_argument("--noise", default="gaussian", choices=["gaussian", "zeros"],
         help="Kind of noise to add inside the model")
+    P.add_argument("--beta1", type=float, default=.9,
+        help="AdamW beta1")
+    P.add_argument("--beta2", type=float, default=.95,
+        help="AdamW beta2")
+    P.add_argument("--wd", type=float, default=.01,
+        help="AdamW weight decay")
+    P.add_argument("--scheduler", default="linear_ramp",
+        choices=["linear_ramp", "linear_ramp_cosine_decay"],
+        help="Which scheduler to use")
+    P.add_argument("--headstart_z", type=int, default=0,
+        help="Number of epochs to only train z parameters")
 
     # Training arguments for the MAE architecture
     P.add_argument("--epochs", type=int, default=64,
@@ -117,14 +146,8 @@ def add_train_imle_args(P):
         help="Number of epochs of linear learning rate warmup")
 
     # Training arguments for the latent code blocks
-    P.add_argument("--epochs_z", type=int, default=16,
-        help="Number of sampling/training steps to run")
     P.add_argument("--lr_z", type=float, default=1e-4,
         help="Base learning rate")
-    P.add_argument("--min_lr_z", type=float, default=0,
-        help="Minumum learning rate")
-    P.add_argument("--n_ramp_z", type=int, default=10,
-        help="Number of epochs of linear learning rate warmup")
 
     # Latent code block architectgure arguments
     P.add_argument("--act_type", default="leakyrelu",
@@ -132,5 +155,5 @@ def add_train_imle_args(P):
         help="Activation type")
 
     P.add_argument("--job_id", default=None,
-        help="SLURM job_id if available")
+        help="SLURM job_id if available, or UID of run to resume.")
     return P
