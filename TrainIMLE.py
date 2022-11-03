@@ -474,9 +474,6 @@ if __name__ == "__main__":
         classes=classes,
         seed=args.seed)
 
-    if len(data_val) < args.ex_for_probe:
-        raise ValueError(f"Evaluation data has only {examples}, but {args.ex_for_probe} were requested.")
-    
     if kkm is None:
         kkm = KOrKMinusOne(range(len(data_tr)), shuffle=True, seed=args.seed)
 

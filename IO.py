@@ -38,9 +38,9 @@ def add_linear_probe_args(P):
         help="Linear probe training batch size")
     P.add_argument("--probe_bs_val", type=int, default=256,
         help="Linear probe test/data gathering batch size")
-    P.add_argument("--val_n_way", type=int, default=10,
+    P.add_argument("--val_n_way", type=int, default=100,
         help="Number of classes in probe/finetune data")
-    P.add_argument("--val_n_shot", type=int, default=1000,
+    P.add_argument("--val_n_shot", type=int, default=100,
         help="Number of examples per class in probe/finetune data")
     P.add_argument("--probe_lr", type=float, default=1e-3,
         help="Linear probe base learning rate")
@@ -65,8 +65,6 @@ def add_eval_imle_args(P):
         help="Number of latents per example for logging images")
     P.add_argument("--fast_linear_probe", default=1, choices=[0, 1], type=int,
         help="Whether to do fast linear probing each validation")
-    P.add_argument("--ex_for_probe", type=int, default=-1,
-        help="Number of examples for the fast linear probe")
     
     # Logging arguments
     P.add_argument("--evals_per_epoch", type=int, default=1,

@@ -15,7 +15,7 @@ from original_code.models_vit import VisionTransformer
 from original_code.util import pos_embed as PE
 
 from Utils import *
-from Blocks import AdaIN, VariationalBottleneck
+from Blocks import AdaIN
 from Augmentation import de_normalize
 
 class MaskedAutoencoderViT(nn.Module):

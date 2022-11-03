@@ -1,3 +1,4 @@
+from collections import OrderedDict
 import torch
 import torch.nn as nn
 from tqdm import tqdm as tqdm
@@ -7,24 +8,73 @@ def get_act(act_type):
     if act_type == "gelu":
         return nn.GELU()
     elif act_type == "leakyrelu":
-        return nn.LeakyReLU()
+        return nn.LeakyReLU(negative_slope=.2)
     else:
         raise NotImplementedError(f"Unknown activation '{act_type}'")
 
+def get_lin_layer(in_dim, out_dim, equalized_lr=True, bias=True, **kwargs):
+    """
+    """
+    if equalized_lr:
+        return EqualizedLinear(in_dim, out_dim, bias=bias, **kwargs)
+    else:
+        return nn.Linear(in_dim, out_dim, bias=bias)
+
+
+class PixelNormLayer(nn.Module):
+    """From https://github.com/huangzh13/StyleGAN.pytorch/blob/b1dfc473eab7c1c590b39dfa7306802a0363c198/models/CustomLayers.py.
+    """
+    def __init__(self, epsilon=1e-8):
+        super().__init__()
+        self.epsilon = epsilon
+
+    def forward(self, x):
+        return x * torch.rsqrt(torch.mean(x ** 2, dim=1, keepdim=True) + self.epsilon)
+
+class EqualizedLinear(nn.Module):
+    """Linear layer with equalized learning rate and custom learning rate multiplier.
+    
+    From https://github.com/huangzh13/StyleGAN.pytorch/blob/master/models/CustomLayers.py.
+    """
+
+    def __init__(self, input_size, output_size, gain=2 ** .5, use_wscale=True, lrmul=.01, bias=True):
+        super().__init__()
+        he_std = gain * input_size ** (-0.5)
+        if use_wscale:
+            init_std = 1.0 / lrmul
+            self.w_mul = he_std * lrmul
+        else:
+            init_std = he_std / lrmul
+            self.w_mul = lrmul
+        self.weight = torch.nn.Parameter(torch.randn(output_size, input_size) * init_std)
+        if bias:
+            self.bias = torch.nn.Parameter(torch.zeros(output_size))
+            self.b_mul = lrmul
+        else:
+            self.bias = None
+
+    def forward(self, x):
+        bias = self.bias * self.b_mul if self.bias is not None else self.bias
+        return nn.functional.linear(x, self.weight * self.w_mul, bias)
+
 class MLP(nn.Module):
-    def __init__(self, in_dim=None, h_dim=256, out_dim=42, layers=4, act_type="gelu", 
-        end_with_act=True):
+    def __init__(self, in_dim, h_dim=256, out_dim=42, layers=4, 
+        act_type="leakyrelu", equalized_lr=True, end_with_act=True):
         super(MLP, self).__init__()
 
         if layers == 1 and end_with_act:
-            self.model =  nn.Sequential(nn.Linear(in_dim, out_dim), get_act(act_type))
+            self.model = nn.Sequential(
+                get_lin_layer(in_dim, out_dim, equalized_lr=equalized_lr),
+                get_act(act_type))
         elif layers == 1 and not end_with_act:
-            self.model = nn.Linear(in_dim, out_dim)
+            self.model = get_lin_layer(in_dim, out_dim,
+                equalized_lr=equalized_lr)
         elif layers > 1:
-            layer1 =  nn.LazyLinear(h_dim) if in_dim is None else nn.Linear(in_dim, h_dim)
-            middle_layers = [nn.Linear(h_dim, h_dim) for _ in range(layers - 2)]
-            layerN = nn.Linear(h_dim, out_dim)
-            linear_layers = [layer1] + middle_layers + [layerN]
+            layer1 = get_lin_layer(in_dim, h_dim, equalized_lr=equalized_lr)
+            mid_layers = [get_lin_layer(h_dim, h_dim, equalized_lr=equalized_lr)
+                for _ in range(layers - 2)]
+            layerN = get_lin_layer(h_dim, out_dim, equalized_lr=equalized_lr)
+            linear_layers = [layer1] + mid_layers + [layerN]
 
             layers = []
             for idx,l in enumerate(linear_layers):
@@ -38,15 +88,10 @@ class MLP(nn.Module):
             
             self.model = nn.Sequential(*layers)
         
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        # we use xavier_uniform following official JAX ViT:
-        if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight)
-        if isinstance(m, nn.Linear) and m.bias is not None:
-            nn.init.constant_(m.bias, 0)
-        
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.h_dim = h_dim
+                
     def forward(self, x): return self.model(x)
 
 class AdaIN(nn.Module):
@@ -58,16 +103,24 @@ class AdaIN(nn.Module):
     element of the jth patch is scaled identically to the kth element of any
     other patch in that image.
     """
-    def __init__(self, c, epsilon=1e-6, act_type="gelu"):
+    def __init__(self, c, epsilon=1e-8, act_type="leakyrelu", normalize_z=True):
         super(AdaIN, self).__init__()
         self.register_buffer("epsilon", torch.tensor(epsilon))
         self.c = c
-        self.mapping_net_pretrain_z = MLP(in_dim=512,
+
+        layers = []
+        if normalize_z:
+            layers.append(("normalize_z", PixelNormLayer(epsilon=epsilon)))
+        layers.append(("mapping_net", MLP(in_dim=512,
             h_dim=512,
             layers=8,
             out_dim=c * 2,
-            act_type=act_type)
+            equalized_lr=True,
+            act_type=act_type)))
 
+        self.model = nn.Sequential(OrderedDict(layers))
+
+        
     def get_latent_spec(self, x): return (512,)
 
     def forward(self, x, z):
@@ -76,7 +129,7 @@ class AdaIN(nn.Module):
         x   -- image features
         z   -- latent codes
         """
-        z = self.mapping_net_pretrain_z(z)
+        z = self.model(z)
         z_mean = z[:, :self.c]
         z_std = z[:, self.c:]
 
@@ -85,37 +138,5 @@ class AdaIN(nn.Module):
         z_std = z_std.unsqueeze(1).expand(*x.shape)
         result = z_mean + x * z_std
         return result
-
-class VariationalBottleneck(nn.Module):
-
-    def __init__(self, encoder_layers=2, encoder_h_dim=2048, h_dim=128, 
-        decoder_layers=2, decoder_h_dim=2048, normalize_z=True,
-        decoder_out_dim=768, act_type="gelu"):
-        super(VariationalBottleneck, self).__init__()
-        self.normalize_z = normalize_z
-        self.encoder = MLP(in_dim=decoder_out_dim,
-            h_dim=encoder_h_dim,
-            out_dim=h_dim,
-            layers=encoder_layers,
-            act_type=act_type)
-
-        self.decoder = MLP(in_dim=h_dim,
-            h_dim=decoder_h_dim,
-            out_dim=decoder_out_dim,
-            layers=decoder_layers,
-            act_type=act_type,
-            end_with_act=False)
-
-    def get_latent_spec(self, x):
-        return self.encoder(x).shape[1:]
-    
-    def forward(self, x, z):
-        z = nn.functional.normalize(z, dim=-1) if self.normalize_z else z
-        fx = self.encoder(x)
-        fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
-        fx = fx + z
-        fx = self.decoder(fx)
-        return fx
-
 
 
