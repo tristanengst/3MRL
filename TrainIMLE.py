@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Subset, Dataset
 from original_code.models_mae import mae_vit_base_patch16 as foo
 
 from Augmentation import *
-from ApexUtils import *
+import Misc
 from Data import *
 from FastLinearProbe import fast_linear_probe
 from IO import *
@@ -29,10 +29,10 @@ def model_folder(args, make_folder=False):
     """
     data = os.path.basename(os.path.dirname(args.data_tr.strip("/"))).strip("/")
     v_spec = "_".join(args.v_spec)
-    folder = f"{args.save_folder}/{data}-{args.arch}-bs{args.ex_per_epoch}-epochs{args.epochs}-headstartz{args.headstart_z}-ipe{args.ipe}-lr{args.lr:.2e}-lrz{args.lr_z}-nramp{args.n_ramp}-ns{args.ns}-scheduler{args.scheduler}-vspec{v_spec}-{args.uid}{suffix_str(args)}"
+    folder = f"{args.save_folder}/{data}-{args.arch}-bs{args.ex_per_epoch}-epochs{args.epochs}-headstartz{args.headstart_z}-ipe{args.ipe}-lr{args.lr:.2e}-lrz{args.lr_z}-nramp{args.n_ramp}-ns{args.ns}-scheduler{args.scheduler}-vspec{v_spec}-{args.uid}{Misc.suffix_str(args)}"
 
     if make_folder:
-        conditional_safe_make_directory(folder)
+        Misc.conditional_safe_make_directory(folder)
         if not os.path.exists(f"{folder}/config.json"):
             with open(f"{folder}/config.json", "w+") as f:
                 json.dump(vars(args), f)
@@ -252,8 +252,8 @@ def validate(model, data_tr, data_val, latent_spec, args):
     else:
         probe_acc = -1
 
-    idxs = seeded_sample(range(len(data_val)),
-        k=args.ex_for_mse_loss,
+    idxs = Misc.sample(range(len(data_val)),
+        k=min(args.ex_for_mse_loss, len(data_val)),
         seed=args.seed)
     vae_loss_te = get_reconstruction_images_loss(model,
         Subset(data_val, indices=idxs),
@@ -284,7 +284,6 @@ def validate(model, data_tr, data_val, latent_spec, args):
 
 def save_state(model, optimizer, scheduler, kkm, epoch, args):
     """Saves input training utilities."""
-    conditional_safe_make_directory(f"{model_folder(args, make_folder=True)}")
     torch.save({"model": de_dataparallel(model).cpu().state_dict(),
         "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
         "idx2v_method": de_dataparallel(model).idx2v_method,
@@ -293,7 +292,7 @@ def save_state(model, optimizer, scheduler, kkm, epoch, args):
         "args": args,
         "last_epoch": epoch,
         "kkm": kkm.state_dict()},
-        f"{model_folder(args)}/{epoch}.pt")
+        f"{model_folder(args, make_folder=True)}/{epoch}.pt")
     model = model.to(device)
     tqdm.write(f"Saved training state to {model_folder(args)}/{epoch}.pt")
 
@@ -306,7 +305,7 @@ def print_and_log_results(data_to_log, args, epoch=0, cur_step=0):
     cur_step    -- the current step
     """
     save_dir = model_folder(args)
-    conditional_safe_make_directory(f"{save_dir}/images")
+    Misc.conditional_safe_make_directory(f"{save_dir}/images")
 
     # Save images and convert them to wandb.Image format
     for k in data_to_log:
@@ -341,8 +340,10 @@ def get_args(args=None):
     P = add_eval_imle_args(P)
 
     args = P.parse_args() if args is None else P.parse_args(args)
-    args.uid = wandb.util.generate_id() if args.job_id is None else args.job_id
     args.save_folder = args.save_folder.strip("/")
+
+    if args.uid is None:
+        args.uid = wandb.util.generate_id()
 
     if len(args.v_spec) == 0:
         tqdm.write(f"WARNING: empty --v_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
@@ -373,12 +374,17 @@ def get_initial_training_constructs(args):
     mae.load_state_dict(mae_model_state)
     model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
     model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs).to(device)
+
+    if args.resume is not None:
+        old_state = torch.load(args.resume)["model"]
+        model.load_state_dict(old_state)
+
     model = nn.DataParallel(model, device_ids=args.gpus).to(device)
     
     params_z = [v for p,v in model.named_parameters()
-            if "pretrain_z" in p]
+            if "v_method" in p]
     params_mae = [v for p,v in model.named_parameters()
-            if not "pretrain_z" in p]
+            if not "v_method" in p]
     optimizer = AdamW([{"params": params_z,
         "lr": args.lr_z,
         "initial_lr": 0,
@@ -444,10 +450,10 @@ if __name__ == "__main__":
     latent_spec = model.module.get_latent_spec(mask_ratio=args.mask_ratio,
         input_size=args.input_size)
         
-    pretty_print_args(args)
+    Misc.pretty_print_args(args)
     tqdm.write(f"LOG: Will save to {model_folder(args)}")
     
-    # tqdm.write(f"MODEL\n{model}")
+    tqdm.write(f"MODEL\n{dict(model.named_parameters()).keys()}")
     tqdm.write(f"OPTIMIZER\n{optimizer}")
     tqdm.write(f"LATENT_SPEC\n{latent_spec}")
 
@@ -463,12 +469,12 @@ if __name__ == "__main__":
     else:
         classes = torch.linspace(0, len(data_tr.classes) - 1, args.train_n_way)
         classes = [data_tr.classes[int(c.item())] for c in classes]
-    data_tr = get_fewshot_dataset(data_tr,
+    data_tr = Misc.get_fewshot_dataset(data_tr,
         n_way=args.train_n_way,
         n_shot=args.train_n_shot,
         classes=classes,
         seed=args.seed)
-    data_val = get_fewshot_dataset(data_val,
+    data_val = Misc.get_fewshot_dataset(data_val,
         n_way=args.train_n_way,
         n_shot=args.train_n_shot,
         classes=classes,
@@ -511,7 +517,7 @@ if __name__ == "__main__":
     scaler = torch.cuda.amp.GradScaler(init_scale=1)
     log_iter = max(1, int((args.epochs - (last_epoch + 1)) * args.ipe / 10000))
     tqdm.write(f"LOG: Will log every {log_iter} gradient steps")
-
+    wandb.watch(model, log='all', log_freq=8)
     for epoch in tqdm(range(last_epoch+1, args.epochs),
         desc="TRAINING: Epochs",
         dynamic_ncols=True,
@@ -524,7 +530,7 @@ if __name__ == "__main__":
                 data_val=data_val,
                 latent_spec=latent_spec,
                 args=args)
-            print_and_log_results(data_to_log, args)
+            print_and_log_results(data_to_log, args, epoch=epoch)
 
         # Sample latent codes and create the DataLoader for the epoch
         batch_data_tr = Subset(data_tr, indices=kkm.pop_k(args.ex_per_epoch))

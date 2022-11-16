@@ -2,13 +2,20 @@ import argparse
 from collections import OrderedDict
 from copy import deepcopy
 import io
-import matplotlib
-from ApexUtils import *
+import json
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+import torch
+import torch.nn as nn
 from torchvision.transforms import functional as tv_functional
 import wandb
 
-from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
+from tqdm import tqdm
+
+from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
+import Misc
 
 # I don't think this does anything because we don't have convolutions, but it
 # probably can't hurt
@@ -72,7 +79,7 @@ def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
 
 def images_to_pil_image(images):
     """Returns tensor datastructure [images] as a PIL image."""
-    images = make_2d_list_of_tensor(images)
+    images = Misc.make_2d_list_of_tensor(images)
 
     fig, axs = plt.subplots(ncols=max([len(image_row) for image_row in images]),
         nrows=len(images),
@@ -119,7 +126,7 @@ class KOrKMinusOne:
         self.seed = seed
 
         if shuffle:
-            self.idxs = seeded_sample(idxs, k=len(idxs), seed=seed)
+            self.idxs = Misc.sample(idxs, k=len(idxs), seed=seed)
         else:
             self.idxs = idxs
 
@@ -128,7 +135,7 @@ class KOrKMinusOne:
             self.counter = 0
             self.num_resets += 1
             if self.shuffle:
-                self.idxs = seeded_sample(self.idxs,
+                self.idxs = Misc.sample(self.idxs,
                     k=len(self.idxs),
                     seed=self.seed + self.num_resets)
             else:
@@ -149,18 +156,6 @@ class KOrKMinusOne:
         kkm = KOrKMinusOne([])
         kkm.__dict__.update(state_dict)
         return kkm
-
-
-def seeded_sample(select_from, k=-1, seed=0):
-    """Returns [k] items sampled without replacement from [select_from] with
-    seed [seed], without changing the internal seed of the program. This
-    explicitly ensures reproducability.
-    """
-    state = random.getstate()
-    random.seed(seed)
-    result = random.sample(select_from, k=k)
-    random.setstate(state)
-    return result
 
 import math
 import torch
@@ -235,7 +230,7 @@ class LinearRampScheduler(_LRScheduler):
                     pg["lr"] = self.pg2step[pg["name"]] * self.lr_inc_per_step[pg["name"]] + self.min_lr
                     self.pg2step[pg["name"]] += 1
                 else:
-                    pass
+                    self.pg2step[pg["name"]] += 1
 
         self.global_step += 1
 

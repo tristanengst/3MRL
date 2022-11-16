@@ -4,6 +4,7 @@ NOTES:
 1. Pretrained models are available at https://github.com/facebookresearch/mae/issues/8, which isn't the same as those directly linked in the repo.
 """
 from functools import partial
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn

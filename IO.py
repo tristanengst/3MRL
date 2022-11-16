@@ -22,6 +22,8 @@ def add_util_args(P):
         help="Optional suffix")
     P.add_argument("--seed", type=str, default=1701,
         help="Random seed")
+    P.add_argument("--uid", type=str, default=None,
+        help="WandB UID")
     return P
 
 def add_hardware_args(P):
@@ -49,7 +51,7 @@ def add_linear_probe_args(P):
     P.add_argument("--probe_ignore_z",  type=int, default=1, choices=[0, 1],
         help="Whether to ignore the code in all linear probing")
     P.add_argument("--probe_eval_iter", type=int, default=-1,
-        help="Evaluate linear probe every PROBE_EVAL_ITER epochs")
+        help="Evaluate every PROBE_EVAL_ITER epochs during training the probe")
     return P
 
 def add_eval_imle_args(P):
