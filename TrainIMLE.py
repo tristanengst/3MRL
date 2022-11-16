@@ -400,7 +400,7 @@ def get_initial_training_constructs(args):
 
 if __name__ == "__main__":
     args = get_args()
-    
+    Misc.set_seed(args.seed) # Reproducability
 
     ############################################################################
     # Load resumed things or instantiate them
