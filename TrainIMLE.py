@@ -596,9 +596,10 @@ if __name__ == "__main__":
                 data_to_log |= {f"pretrain/lr_{g}": lr
                     for g,lr in scheduler_to_lrs(scheduler).items()}
                 
-                if (batch_idx > 0
+                if (batch_idx == len(batch_loader) - 1
+                    or (batch_idx > 0
                     and (batch_idx % (args.ipe // args.evals_per_epoch) == 0
-                        or batch_idx == gradient_steps - 1)):
+                        or batch_idx == gradient_steps - 1))):
                     data_to_log |= validate(model=model,
                         data_tr=data_tr,
                         data_val=data_val,
