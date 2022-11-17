@@ -12,12 +12,19 @@ def get_pretrain_transforms(args):
 
 def get_train_transforms(args):
     """Returns transforms for pretraining."""
-    return transforms.Compose([
-        transforms.RandomResizedCrop(args.input_size,
-            scale=(0.2, 1.0), interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=imagenet_mean, std=imagenet_std)])
+    if args.use_augs:
+        return transforms.Compose([
+            transforms.RandomResizedCrop(args.input_size,
+                scale=(0.2, 1.0), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=imagenet_mean, std=imagenet_std)])
+    else:
+        return transforms.Compose([
+            transforms.Resize((args.input_size, args.input_size),
+                interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=imagenet_mean, std=imagenet_std)])
 
 
 def get_test_transforms(args):

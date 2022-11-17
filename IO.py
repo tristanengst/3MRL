@@ -33,6 +33,13 @@ def add_hardware_args(P):
         help="Number of DataLoader workers")
     return P
 
+def add_train_imle_debugging_args(P):
+    P.add_argument("--shuffle_data", default=1, choices=[0, 1], type=int,
+        help="Whether to shuffle data")
+    P.add_argument("--use_augs", default=1, choices=[0, 1], type=int,
+        help="Whether to use data augmentation")
+    return P
+
 def add_linear_probe_args(P):
     P.add_argument("--global_pool", type=int, default=1, choices=[0, 1],
         help="Whether to global pool in linear probing")
@@ -130,7 +137,7 @@ def add_train_imle_args(P):
     P.add_argument("--wd", type=float, default=.01,
         help="AdamW weight decay")
     P.add_argument("--scheduler", default="linear_ramp",
-        choices=["linear_ramp", "linear_ramp_cosine_decay"],
+        choices=["linear_ramp", "linear_ramp_cosine_decay", "constant"],
         help="Which scheduler to use")
     P.add_argument("--headstart_z", type=int, default=0,
         help="Number of epochs to only train z parameters")

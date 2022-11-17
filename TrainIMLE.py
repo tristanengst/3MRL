@@ -304,6 +304,8 @@ def print_and_log_results(data_to_log, args, epoch=0, cur_step=0):
     args        -- argparse Namespace for training
     cur_step    -- the current step
     """
+    cur_step = args.ipe * epoch if cur_step == 0 and not epoch == 0 else cur_step
+
     save_dir = model_folder(args)
     Misc.conditional_safe_make_directory(f"{save_dir}/images")
 
@@ -338,12 +340,16 @@ def get_args(args=None):
     P = add_train_imle_args(P)
     P = add_util_args(P)
     P = add_eval_imle_args(P)
+    P = add_train_imle_debugging_args(P)
 
     args = P.parse_args() if args is None else P.parse_args(args)
     args.save_folder = args.save_folder.strip("/")
 
     if args.uid is None:
         args.uid = wandb.util.generate_id()
+
+    if args.scheduler == "constant" and not args.n_ramp == 0:
+        raise ValueError(f"Can not ramp constant scheduler. Set --n_ramp to zero")
 
     if len(args.v_spec) == 0:
         tqdm.write(f"WARNING: empty --v_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
@@ -395,6 +401,9 @@ def get_initial_training_constructs(args):
         "name": "params_mae"}],
         betas=(args.beta1, args.beta2),
         weight_decay=args.wd)
+    
+    if args.resume is not None:
+        optimizer.load_state_dict(resume["optimizer"])
     
     return model, optimizer
 
@@ -469,19 +478,21 @@ if __name__ == "__main__":
     else:
         classes = torch.linspace(0, len(data_tr.classes) - 1, args.train_n_way)
         classes = [data_tr.classes[int(c.item())] for c in classes]
-    data_tr = Misc.get_fewshot_dataset(data_tr,
+    data_tr = get_fewshot_dataset(data_tr,
         n_way=args.train_n_way,
         n_shot=args.train_n_shot,
         classes=classes,
         seed=args.seed)
-    data_val = Misc.get_fewshot_dataset(data_val,
+    data_val = get_fewshot_dataset(data_val,
         n_way=args.train_n_way,
         n_shot=args.train_n_shot,
         classes=classes,
         seed=args.seed)
 
     if kkm is None:
-        kkm = KOrKMinusOne(range(len(data_tr)), shuffle=True, seed=args.seed)
+        kkm = KOrKMinusOne(range(len(data_tr)),
+            shuffle=args.shuffle_data,
+            seed=args.seed)
 
     tqdm.write(f"TRAINING DATA\n{data_tr}")
     tqdm.write(f"VALIDATION DATA\n{data_val}")
@@ -505,6 +516,8 @@ if __name__ == "__main__":
             pg2base_lrs={"params_mae": args.lr, "params_z": args.lr_z},
             pg2start_step={"params_z": 0, "params_mae": args.headstart_z * args.ipe},
             last_epoch=last_step)
+    elif args.scheduler == "constant":
+        scheduler = NoChangeScheduler(optimizer, last_epoch=last_epoch)
     else:
         raise NotImplementedError()
 
@@ -517,7 +530,7 @@ if __name__ == "__main__":
     scaler = torch.cuda.amp.GradScaler(init_scale=1)
     log_iter = max(1, int((args.epochs - (last_epoch + 1)) * args.ipe / 10000))
     tqdm.write(f"LOG: Will log every {log_iter} gradient steps")
-    wandb.watch(model, log='all', log_freq=8)
+    # wandb.watch(model, log='all', log_freq=8)
     for epoch in tqdm(range(last_epoch+1, args.epochs),
         desc="TRAINING: Epochs",
         dynamic_ncols=True,
@@ -538,7 +551,7 @@ if __name__ == "__main__":
             latent_spec, args, epoch=epoch)
         loader = DataLoader(batch_dataset,
             batch_size=args.mini_bs,
-            shuffle=True,
+            shuffle=args.shuffle_data,
             num_workers=args.num_workers,
             pin_memory=True,
             collate_fn=ImageLatentDataset.collate_fn,

@@ -161,6 +161,17 @@ import math
 import torch
 from torch.optim.lr_scheduler import _LRScheduler
 
+class NoChangeScheduler(_LRScheduler):
+    """Scheduler that does not change learning rate."""
+    def __init__(self, optimizer, last_epoch=-1):
+        super(NoChangeScheduler, self).__init__(optimizer,
+            last_epoch=last_epoch)
+    
+    def get_lr(self): return {pg["name"]: pg["lr"] for pg in self.optimizer.param_groups}
+
+    def step(self): pass
+
+
 class LinearRampScheduler(_LRScheduler):
     """Scheduler giving a linear ramp followed by a constant learning rate.
 
