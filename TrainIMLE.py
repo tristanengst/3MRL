@@ -653,8 +653,7 @@ if __name__ == "__main__":
                     epoch=epoch,
                     cur_step=cur_step)
             elif (cur_step % args.steps_per_eval == 0
-                and not batch_idx == 0
-                and not epoch == last_epoch + 1):
+                and not (batch_idx == 0 and epoch == last_epoch + 1)):
 
                 data_to_log = {"pretrain/loss_tr": loss.item()}
                 data_to_log |= {f"pretrain/lr_{g}": lr
