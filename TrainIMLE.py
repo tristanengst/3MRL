@@ -39,7 +39,7 @@ def model_folder(args, make_folder=False):
     return folder
 
 class ImageLatentDataset(Dataset):
-    """Dataset for loading images and latents to a MaskedViTVAE model. The
+    """Dataset for loading images and latents to a MaskedViTgen model. The
     provided collate function must be used in any DataLoaders wrappeding this
     dataset.
 
@@ -67,9 +67,10 @@ class ImageLatentDataset(Dataset):
         return images, {"mask_noise": mask_noises, "latents": latents}
 
     def get_val_results(self, model, args):
-        """Returns a dictionary giving the loss and image grid for the [idxs]
-        elements of the dataset via [model].
-
+        """Returns a dictionary giving the loss and image grid given from 
+        [model] for a small subset of the images and latents in [self]. This is
+        useful as a quick validation.
+        
         Args:
         model   -- model to use
         args    -- argparse Namespace
@@ -81,6 +82,7 @@ class ImageLatentDataset(Dataset):
                 loss = model(x, z,
                     mask_ratio=args.mask_ratio,
                     ignore_z=args.ignore_z)
+        
         xz = [self.__getitem__(idx) for idx in range(min(args.ex_for_vis_tr, len(self)))]
         with torch.no_grad():
             with torch.cuda.amp.autocast():
@@ -166,7 +168,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                 # We log the mean and not the min because if args.sp is high
                 # enough, it will be hard to meaningfully improve on what we get
                 # the first time we sample, but we still want to see that the
-                # codes we use are better than average
+                # codes we use are better than average.
                 if inner_idx == 0 and args.log_sampling:
                     first_losses.append(losses.mean().item())
 
@@ -176,37 +178,43 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
             "pretrain/step": epoch * args.ipe,
             "epoch": epoch})
 
-    tqdm.write(f" SAMPLING: average first loss {np.mean(first_losses):.5f} | average end loss {least_losses.mean().item():.5f} ")
+    tqdm.write(f"SAMPLING: average first loss {np.mean(first_losses):.5f} | average end loss {least_losses.mean().item():.5f} ")
 
     return ImageLatentDataset(torch.cat(all_images, axis=0).cpu(),
         mask_noises=mask_noise.cpu(),
         latents=best_latents)
 
-def validate(model, data_tr, data_val, latent_spec, args):
+def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
     """Returns a dictionary of validation data about [model].
 
     Args:
-    model       -- MaskedVAEViT model
+    model       -- MaskedIPViT model
     data_tr     -- Dataset of training data for reconstruction
     data_val    -- Dataset of data for linear probe training
     args        -- Namespace with relevant parameters
+    ignore_z    -- whether to ignore latent codes (treat as an autoencoder). If
+                    True, overrides [args.ignore_z].
     """
-    def get_reconstruction_images_loss(model, dataset, latent_spec, args, return_images=True, z_per_ex=8):
-        """Returns an (loss, image_grid) tuple, where [loss] is the average loss
-        of [model] on reconstructing images from [dataset] and [image_grid]  is
-        a grid of images for qualitatively evaluating the reconstructions.
+    def get_reconstruction_images_loss(model, dataset, latent_spec, args, 
+        return_images=True, z_per_ex=8, val_ignore_z=False):
+        """Returns an [loss] or a (loss, image_grid) tuple, where [loss] is the
+        average loss of [model] on reconstructing images from [dataset] and
+        [image_grid]  is a grid of images for qualitatively evaluating the 
+        reconstructions.
 
         Args:
-        model       -- MaskedVAEViT model
-        dataset     -- Dataset containing all the data to use in reconstruction
-        latent_spec -- dictionary giving the latent specification for [model]
-        args        -- Namespace with relevant parameters
+        model           -- MaskedIPViT model
+        dataset         -- ImageFolder-like dataset with the images
+        latent_spec     -- latent specification for [model]
+        args            -- Namespace with relevant parameters
+        return_images   -- return a (loss, image_grid) tuple or just loss
+        z_per_ex        -- number of codes to try for each image
+        val_ignore_z    -- whether to ignore latent codes
         """
         loader = DataLoader(dataset,
             batch_size=args.code_bs * max(1, args.sp // z_per_ex),
             num_workers=args.num_workers,
-            pin_memory=True,
-            shuffle=False)
+            pin_memory=True)
 
         images, preds, masks, total_loss = [], [], [], 0
         with torch.no_grad():
@@ -222,7 +230,7 @@ def validate(model, data_tr, data_val, latent_spec, args):
                     loss, pred, mask = model(x, z,
                         mask_ratio=args.mask_ratio,
                         return_all=True,
-                        ignore_z=args.ignore_z)
+                        ignore_z=val_ignore_z)
 
                 total_loss += (loss.mean() * len(x)).detach()
 
@@ -238,46 +246,53 @@ def validate(model, data_tr, data_val, latent_spec, args):
             preds = preds.view(len(dataset), z_per_ex, *preds.shape[1:])
             image_grid = [[img] + [p for p in pred]
                 for img,pred in zip(images, preds)]
-
-        if return_images:
+            
             return total_loss.item() / (len(dataset)), image_grid
         else:
             return total_loss.item() / (len(dataset))
 
+    # Generally we will specify to not ignore latent codes in [args], but may
+    # wish to ignore them once to get a baseline for what MAE would do.
+    val_ignore_z = args.ignore_z | ignore_z
+
     if args.fast_linear_probe:
-        classes = torch.linspace(0, len(data_tr.classes) - 1, args.val_n_way)
-        classes = [data_tr.classes[int(c.item())] for c in classes]
-        probe_acc = fast_linear_probe(model, data_tr, data_val, args,   
-            classes=classes)
+        probe_acc = fast_linear_probe(model, data_tr, data_val, args, verbose=False)
     else:
         probe_acc = -1
 
-    idxs = Misc.sample(range(len(data_val)),
+    idxs_te = Misc.sample(range(len(data_val)),
         k=min(args.ex_for_mse_loss, len(data_val)),
         seed=args.seed)
-    vae_loss_te = get_reconstruction_images_loss(model,
-        Subset(data_val, indices=idxs),
+    gen_loss_te = get_reconstruction_images_loss(model,
+        Subset(data_val, indices=idxs_te),
         latent_spec, args,
         return_images=False,
-        z_per_ex=args.z_per_ex_loss)
+        z_per_ex=args.z_per_ex_loss,
+        val_ignore_z=val_ignore_z)
 
-    idxs_tr = torch.linspace(0, len(data_tr) - 1, args.ex_for_vis_tr)
+    idxs_tr = Misc.sample(range(len(data_tr)),
+        k=args.ex_for_vis_tr,
+        seed=args.seed)
     _, images_tr = get_reconstruction_images_loss(model,
-        Subset(data_tr, [int(idx) for idx in idxs_tr.tolist()]),
+        Subset(data_tr, indices=idxs_tr),
         latent_spec, args,
         return_images=True,
-        z_per_ex=args.z_per_ex_vis)
-
-    idxs_te = torch.linspace(0, len(data_val) - 1, args.ex_for_vis_te)
+        z_per_ex=args.z_per_ex_vis,
+        val_ignore_z=val_ignore_z)
+    
+    idxs_te = Misc.sample(range(len(data_val)),
+        k=args.ex_for_vis_te,
+        seed=args.seed)
     _, images_te = get_reconstruction_images_loss(model,
-        Subset(data_val, [int(idx) for idx in idxs_te.tolist()]),
+        Subset(data_val, indices=idxs_te),
         latent_spec, args,
         return_images=True,
-        z_per_ex=args.z_per_ex_vis)
+        z_per_ex=args.z_per_ex_vis,
+        val_ignore_z=val_ignore_z)
 
     return {
         "fast_linear_probe/acc_te": probe_acc,
-        "pretrain/loss_te": vae_loss_te,
+        "pretrain/loss_te": gen_loss_te,
         "images/pretrain_train": images_to_pil_image(images_tr),
         "images/pretrain_test": images_to_pil_image(images_te)}
 
@@ -297,36 +312,45 @@ def save_state(model, optimizer, scheduler, kkm, epoch, args):
     tqdm.write(f"Saved training state to {model_folder(args)}/{epoch}.pt")
 
 def print_and_log_results(data_to_log, args, epoch=0, cur_step=0):
-    """Prints and logs results [results].
+    """Prints and logs results [data_to_log].
 
     Args:
     data_to_log -- dictionary of things to log
     args        -- argparse Namespace for training
-    cur_step    -- the current step
+    epoch       -- index of the current epoch or 'baseline'
+    cur_step    -- the current global training gradient step
     """
-    cur_step = args.ipe * epoch if cur_step == 0 and not epoch == 0 else cur_step
-
+    if epoch == "baseline":
+        s = f"BASELINE {'-' * (18 + len(f'{args.epochs}{args.ipe * args.epochs}'))}"
+        image_id_str = "baseline"
+    else:
+        s = f" EPOCH {epoch+1:4}/{args.epochs} -- Step {cur_step:6}/{args.ipe * args.epochs}"
+        image_id_str = f"{epoch+1}_{cur_step % args.ipe}"
+    
     save_dir = model_folder(args)
     Misc.conditional_safe_make_directory(f"{save_dir}/images")
 
     # Save images and convert them to wandb.Image format
     for k in data_to_log:
         if "images" in k:
-            file_name = k.replace("images/", f"images/{epoch+1}_{cur_step % args.ipe}")
+            file_name = k.replace("images/", f"images/{image_id_str}")
             data_to_log[k].save(f"{save_dir}/{file_name}.png")
             data_to_log[k] = wandb.Image(data_to_log[k])
 
-    wandb.log(data_to_log | {"pretrain/step": cur_step, "epoch": epoch})
+    # Upload to WandB
+    if epoch == "baseline":
+        wandb.log(data_to_log | {"pretrain/step": -1})
+    else:
+        wandb.log(data_to_log | {"pretrain/step": cur_step, "epoch": epoch})
 
-    s = f"Epoch {epoch+1:4}/{args.epochs} -- Step {cur_step:6}/{args.ipe * args.epochs}"
+    # Print string describing training
     for k,v in sorted(data_to_log.items()):
         s += f" | {k} {v:.3e}".replace("_params", "") if "lr" in k else ""
     for k,v in sorted(data_to_log.items(), reverse=True):
         s += f" | {k} {v:.5f}" if "loss" in k else ""
+    
     if "fast_linear_probe/acc_te" in data_to_log:
         s += f" | fast_linear_probe/acc_te {data_to_log['fast_linear_probe/acc_te']:.5f}"
-    else:
-        s = "  " + s
 
     s = s.replace("pretrain/", "")
     tqdm.write(s)
@@ -350,6 +374,8 @@ def get_args(args=None):
 
     if args.scheduler == "constant" and not args.n_ramp == 0:
         raise ValueError(f"Can not ramp constant scheduler. Set --n_ramp to zero")
+    if args.scheduler == "linear_ramp_cosine_decay" and not args.headstart_z == 0:
+        raise ValueError(f"Can not headstart the mapping network with this scheduler")
 
     if len(args.v_spec) == 0:
         tqdm.write(f"WARNING: empty --v_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
@@ -364,8 +390,10 @@ def get_args(args=None):
 
     return args
 
-def get_initial_training_constructs(args):
-    """
+def get_masked_ipvit_model(args):
+    """Returns an MaskedIPViT model with the weights and architecture of an MAE
+    model specified in [args. Resuming a MaskedIPViT model is not handeled, ie.
+    the model weights are pure MAE weights.
     """
     # Instantiate the MAE model we're finetuning
     if args.arch == "vit_base":
@@ -376,11 +404,19 @@ def get_initial_training_constructs(args):
         mae = mae_vit_large_patch16(norm_pix_loss=args.norm_pix_loss)
     else:
         raise NotImplementedError()
-    
     mae.load_state_dict(mae_model_state)
     model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
-    model = MaskedVAEViT(parse_variational_spec(args), **model_kwargs).to(device)
+    model = MaskedIPViT(parse_ip_spec(args), **model_kwargs)
 
+    model = model.to(torch.float32)
+    return model
+
+def get_model_optimizer(args):
+    """Returns a (model, optimizer) tuple where [model] is the model to be
+    trained and [optimizer] is its optimizer given [args]. This function
+    supports resuming old models and moving to the device.
+    """
+    model = get_masked_ipvit_model(args)
     if args.resume is not None:
         old_state = torch.load(args.resume)["model"]
         model.load_state_dict(old_state)
@@ -409,13 +445,16 @@ def get_initial_training_constructs(args):
 
 if __name__ == "__main__":
     args = get_args()
-    Misc.set_seed(args.seed) # Reproducability
+    Misc.set_seed(args.seed)
 
     ############################################################################
-    # Load resumed things or instantiate them
+    # Load resumed things or instantiate them. If resuming and the resumed
+    # model's UID is given, all but evaluation- and hardware-specific arguments
+    # are loaded along with the old model's KKM. Otherwise when resuming, only
+    # the old model and optimizer states, and last-run epoch index are loaded.
     ############################################################################
     if args.resume is None:
-        model, optimizer = get_initial_training_constructs(args)
+        model, optimizer = get_model_optimizer(args)
         wandb.init(anonymous="allow", id=args.uid, config=args,
             mode=args.wandb, project="3MRL",
             name=os.path.basename(model_folder(args)))
@@ -427,67 +466,70 @@ if __name__ == "__main__":
         old_args = resume["args"]
 
         if old_args.uid == args.uid:
-            # Update [args] to be identical to [old_args] except in some cases
+            # Update [args] to be identical to [old_args] except in respect to
+            # hardware and evaluation.
             keep_args = get_arg_names_from_fn(add_hardware_args)
             keep_args |= get_arg_names_from_fn(add_linear_probe_args)
             keep_args |= get_arg_names_from_fn(add_eval_imle_args)
             keep_args |= {"save_folder"}
             keep_args = {k: v for k,v in vars(args).items() if k in keep_args}
-            args.__dict__.update(vars(old_args))
-            args.__dict__.update(keep_args)
+            args.__dict__.update(vars(old_args) | keep_args)
 
-            model, optimizer = get_initial_training_constructs(args)
-            optimizer.load_state_dict(resume["optimizer"])
+            model, optimizer = get_model_optimizer(args)
             kkm = KOrKMinusOne.from_state_dict(resume["kkm"])
             wandb.init(id=args.uid, resume="must", mode=args.wandb,
                 project="3MRL", config=args,
                 name=os.path.basename(model_folder(args)))
         else:
             args.arch = old_args.arch
-            model, optimizer = get_initial_training_constructs(args)
-            optimizer.load_state_dict(resume["optimizer"])
+            model, optimizer = get_model_optimizer(args)
             wandb.init(anonymous="allow", id=args.uid, config=args,
                 mode=args.wandb, project="3MRL",
                 name=os.path.basename(model_folder(args)))
 
-        model.load_state_dict(resume["model"], strict=False)
-        model = model.to(device)
-        kkm = KOrKMinusOne.from_state_dict(resume["kkm"])
         last_epoch = resume["last_epoch"]
-        last_step = last_epoch * args.ipe + args.ipe
+        last_step = last_epoch * old_args.ipe + old_args.ipe
 
-    latent_spec = model.module.get_latent_spec(mask_ratio=args.mask_ratio,
+    latent_spec = model.module.get_latent_spec(
+        mask_ratio=args.mask_ratio,
         input_size=args.input_size)
         
     Misc.pretty_print_args(args)
     tqdm.write(f"LOG: Will save to {model_folder(args)}")
     
-    tqdm.write(f"MODEL\n{dict(model.named_parameters()).keys()}")
+    # tqdm.write(f"MODEL\n{dict(model.named_parameters()).keys()}")
     tqdm.write(f"OPTIMIZER\n{optimizer}")
     tqdm.write(f"LATENT_SPEC\n{latent_spec}")
 
     ############################################################################
-    # Get the data and KKM
+    # Get the data and KKM. If resuming from an MAE checkpoint, we need to train
+    # on all of ImageNet or any improvements can be attributed to overfitting
+    # the subsample we train on. However, for debugging or training from scratch
+    # a subsample of ImageNet can be used.
     ############################################################################
     data_tr = data_path_to_dataset(args.data_tr,
         transform=get_train_transforms(args))
     data_val = data_path_to_dataset(args.data_val,
         transform=get_train_transforms(args))
-    if args.train_n_way == -1:
-        classes = "all"
-    else:
-        classes = torch.linspace(0, len(data_tr.classes) - 1, args.train_n_way)
-        classes = [data_tr.classes[int(c.item())] for c in classes]
-    data_tr = get_fewshot_dataset(data_tr,
-        n_way=args.train_n_way,
-        n_shot=args.train_n_shot,
-        classes=classes,
-        seed=args.seed)
-    data_val = get_fewshot_dataset(data_val,
-        n_way=args.train_n_way,
-        n_shot=args.train_n_shot,
-        classes=classes,
-        seed=args.seed)
+   
+    if not args.train_n_way == -1 or not args.train_n_shot == -1:
+        if args.train_n_way == -1:
+            classes = -1
+        else:
+            classes = torch.linspace(0, len(data_tr.classes) - 1, args.train_n_way)
+            classes = [data_tr.classes[int(c.item())] for c in classes]
+
+        data_tr = get_fewshot_dataset(data_tr,
+            n_way=args.train_n_way,
+            n_shot=args.train_n_shot,
+            classes=classes,
+            seed=args.seed)
+        data_val = get_fewshot_dataset(data_val,
+            n_way=args.train_n_way,
+            n_shot=args.train_n_shot,
+            classes=classes,
+            seed=args.seed,
+            fewer_shots_if_needed=True)
 
     if kkm is None:
         kkm = KOrKMinusOne(range(len(data_tr)),
@@ -502,8 +544,6 @@ if __name__ == "__main__":
     # Get the scheduler
     ############################################################################    
     if args.scheduler == "linear_ramp_cosine_decay":
-        if args.headstart_z > 0:
-            raise ValueError(f"linear_ramp_cosine_decay scheduler option does not support giving the z parameters a headstart")
         scheduler = CosineAnnealingWarmupRestartsMultipleParamGroups(optimizer,
             first_cycle_steps=args.epochs * args.ipe,
             warmup_steps=args.n_ramp * args.ipe,
@@ -514,7 +554,7 @@ if __name__ == "__main__":
             warmup_steps=args.n_ramp * args.ipe,
             min_lr=args.min_lr,
             pg2base_lrs={"params_mae": args.lr, "params_z": args.lr_z},
-            pg2start_step={"params_z": 0, "params_mae": args.headstart_z * args.ipe},
+            pg2start_step={"params_mae": args.headstart_z * args.ipe, "params_z": 0},
             last_epoch=last_step)
     elif args.scheduler == "constant":
         scheduler = NoChangeScheduler(optimizer, last_epoch=last_epoch)
@@ -523,6 +563,19 @@ if __name__ == "__main__":
 
     tqdm.write(f"SCHEDULER\n{scheduler}")
 
+    ############################################################################
+    # If desired, evaluate with plain MAE. This is important as it gives the
+    # baseline we want to improve from. We log these with a step of -1.
+    ############################################################################
+    if args.get_mae_baseline:
+        mae = nn.DataParallel(get_masked_ipvit_model(args), device_ids=args.gpus)
+        mae_results = validate(model=mae.to(device),
+            data_tr=data_tr,
+            data_val=data_val,
+            latent_spec=latent_spec,
+            args=args,
+            ignore_z=True)
+        print_and_log_results(mae_results, args, epoch="baseline")
 
     ############################################################################
     # Begin training
@@ -530,20 +583,22 @@ if __name__ == "__main__":
     scaler = torch.cuda.amp.GradScaler(init_scale=1)
     log_iter = max(1, int((args.epochs - (last_epoch + 1)) * args.ipe / 10000))
     tqdm.write(f"LOG: Will log every {log_iter} gradient steps")
-    # wandb.watch(model, log='all', log_freq=8)
+    
     for epoch in tqdm(range(last_epoch+1, args.epochs),
         desc="TRAINING: Epochs",
         dynamic_ncols=True,
         leave=False):
 
-        # Do an initial validation of to see where what we need to improve from
+        # Do an initial validation of to see where what we need to improve from.
+        # This should be equivalent to the last validation done in prior
+        # training if we're resuming.
         if epoch == last_epoch + 1:
             data_to_log = validate(model=model,
                 data_tr=data_tr,
                 data_val=data_val,
                 latent_spec=latent_spec,
                 args=args)
-            print_and_log_results(data_to_log, args, epoch=epoch)
+            print_and_log_results(data_to_log, args, epoch=last_epoch)
 
         # Sample latent codes and create the DataLoader for the epoch
         batch_data_tr = Subset(data_tr, indices=kkm.pop_k(args.ex_per_epoch))
@@ -596,7 +651,7 @@ if __name__ == "__main__":
                 data_to_log |= {f"pretrain/lr_{g}": lr
                     for g,lr in scheduler_to_lrs(scheduler).items()}
                 
-                if (batch_idx == len(batch_loader) - 1
+                if (batch_idx == gradient_steps - 1
                     or (batch_idx > 0
                     and (batch_idx % (args.ipe // args.evals_per_epoch) == 0
                         or batch_idx == gradient_steps - 1))):

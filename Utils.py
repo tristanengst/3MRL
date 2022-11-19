@@ -162,14 +162,22 @@ import torch
 from torch.optim.lr_scheduler import _LRScheduler
 
 class NoChangeScheduler(_LRScheduler):
-    """Scheduler that does not change learning rate."""
+    """Scheduler that does not change learning rate.
+    
+    This scheduler will be the only thing to control the learning rate when in
+    use, and the learning rate in the optimizer is ignored. This is a much more
+    convenient API than allowing the optimizer to control the learning rate.
+    """
     def __init__(self, optimizer, last_epoch=-1):
+        self.global_step = last_epoch
         super(NoChangeScheduler, self).__init__(optimizer,
             last_epoch=last_epoch)
     
     def get_lr(self): return {pg["name"]: pg["lr"] for pg in self.optimizer.param_groups}
 
-    def step(self): pass
+    def __str__(self): return f"{self.__class__.__name__} [{self.get_lr()}]"
+
+    def step(self): self.global_step += 1
 
 
 class LinearRampScheduler(_LRScheduler):
@@ -177,7 +185,7 @@ class LinearRampScheduler(_LRScheduler):
 
     This scheduler will be the only thing to control the learning rate when in
     use, and the learning rate in the optimizer is ignored. This is a much more
-    convenient API.
+    convenient API than allowing the optimizer to control the learning rate.
 
     Args:
     optimizer       -- wrapped optimizer
@@ -193,6 +201,8 @@ class LinearRampScheduler(_LRScheduler):
     def __init__(self, optimizer, warmup_steps=0, last_epoch=-1, min_lr=0,
         pg2base_lrs=1e-3, pg2start_step=None, verbose=True):
 
+        if warmup_steps == 0:
+            raise ValueError(f"LinearRampScheduler requires 'warmup_steps' > 0")
         self.global_step = last_epoch
         self.min_lr = min_lr
         self.warmup_steps = warmup_steps

@@ -76,23 +76,22 @@ class FeatureDataset(Dataset):
     def __getitem__(self, idx): return self.feats[idx], self.labels[idx]
 
 
-def fast_linear_probe(model, data_tr, data_val, args, classes=None):
+def fast_linear_probe(model, data_tr, data_val, args, classes=None, verbose=True):
     """Returns a linear probe of [data_tr] and [data_val] using the encoder of
     [model] as a backbone. This can be done in a few minutes, but isn't as
     accurate as the LinearProbe.py script, which can take up to a day to run.
 
     Args:
-    model       -- MaskedVAEViT model to use as a backbone
+    model       -- MaskedIPViT model to use as a backbone
     data_tr     -- Dataset of training data
     data_val    -- Dataset of validation data
     args        -- argparse Namespace
-    ignore_z    -- whether to run with latent codes ignored. For most backbones,
-                    this is equivalent to them being MAE models
+    classes     -- names of classes within [data_tr] to use
     """
     model = de_dataparallel(model).cpu()
 
-    if isinstance(model, MaskedVAEViT):
-        backbone = VariationalViTBackbone(encoder_kwargs=model.encoder_kwargs,
+    if isinstance(model, MaskedIPViT):
+        backbone = IPViTBackbone(encoder_kwargs=model.encoder_kwargs,
             idx2v_method=model.idx2v_method,
             global_pool=args.global_pool,
             noise=args.noise)
@@ -109,7 +108,8 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None):
 
     # Get the data
     if classes is None:
-        classes = random.sample(data_tr.classes, k=args.val_n_way)
+        classes = Misc.sample(data_tr.classes, k=args.val_n_way, seed=args.seed)
+
     data_tr = get_fewshot_dataset(data_tr,
         n_shot=args.val_n_shot,
         classes=classes,
@@ -158,7 +158,7 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None):
     # Train the probe
     for e in tqdm(range(args.probe_epochs),
         desc="FAST LINEAR PROBE: Epochs",
-        leave=True,
+        leave=verbose,
         dynamic_ncols=True):
 
         for batch_idx,(x,y) in tqdm(enumerate(loader_tr),
@@ -260,7 +260,7 @@ if __name__ == "__main__":
         resume = torch.load(args.model)
         encoder_kwargs = resume["encoder_kwargs"]
         idx2v_method = resume["idx2v_method"]
-        model = MaskedVAEViT(idx2v_method=idx2v_method, **encoder_kwargs)
+        model = MaskedIPViT(idx2v_method=idx2v_method, **encoder_kwargs)
         model.load_state_dict(resume["model"])
         model = model.to(device)
     elif args.model == "resnet18":

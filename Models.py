@@ -27,7 +27,7 @@ class MaskedAutoencoderViT(nn.Module):
         norm_pix_loss=False, verbose=False):
         super(MaskedAutoencoderViT, self).__init__()
 
-        # Save variables needed in making this variational
+        # Save variables needed in making this IP
         self.kwargs = {
             "img_size": img_size,
             "patch_size": patch_size,
@@ -78,7 +78,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.initialize_weights()
 
         if verbose:
-            tqdm.write(f"LOG: Constructed MaskedAutoencoderViT model | num_blocks {len(self.blocks)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
+            tqdm.write(f"{self.__class__.__name__} [num_blocks {len(self.blocks)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}]")
 
     def initialize_weights(self):
         # initialize (and freeze) pos_embed by sin-cos embedding
@@ -286,10 +286,10 @@ class VisionTransformerBackbone(VisionTransformer):
     def forward(self, *args, **kwargs):
         return super().forward_features(*args, **kwargs)
 
-def parse_variational_spec(args):
+def parse_ip_spec(args):
     """Returns args.v_spec as a dictionary mapping transformer block indices to
-    whether and how they should be variational. Blocks whose indices aren't in
-    the mapping are assumed in model __init__ methods to be non-variational and
+    whether and how they should be IP. Blocks whose indices aren't in
+    the mapping are assumed in model __init__ methods to be non-IP and
     such blocks need not be specified in the returned dictionary.
     """
     def parse_v_spec_helper(s):
@@ -320,12 +320,12 @@ def extend_idx2v_method(idx2v_method, length):
 
     Args:
     idx2v_method    -- mapping from the first N whole numbers to how/if blocks
-                        with their index should be variational
+                        with their index should be IP
     length          -- length to extend to
     """
     return {k: False for k in range(length)} | idx2v_method
 
-class VariationalBlock(nn.Module):
+class IPBlock(nn.Module):
     """Wraps a vision transformer block and adds noise to its output.
     Args:
     block       -- the vision transformer block to wrap
@@ -335,7 +335,7 @@ class VariationalBlock(nn.Module):
                     dimenion as the block's output
     """
     def __init__(self, block, v_method="add"):
-        super(VariationalBlock, self).__init__()
+        super(IPBlock, self).__init__()
         self.block = block
         self.v_method = v_method
 
@@ -375,25 +375,25 @@ class VariationalBlock(nn.Module):
         else:
             raise NotImplementedError()
 
-class VariationalViT(timm.models.vision_transformer.VisionTransformer):
+class IPViT(timm.models.vision_transformer.VisionTransformer):
     """ViT, but with the ability to add Gaussian noise at some place in the
     forward pass.
 
-    To construct from a MaskedVAEViT model [m]:
-    v = VariationalViT(idx2v_method=m.idx2v_method,
+    To construct from a MaskedIPViT model [m]:
+    v = IPViT(idx2v_method=m.idx2v_method,
         encoder_kwargs=m.encoder_kwargs, ...)
     v.load_state_dict(m.state_dict())
 
     Args:
     idx2v_method    -- mapping from from indices to the blocks to whether and
-                        how they should be variational. If the ith value in the
+                        how they should be IP. If the ith value in the
                         mapping is False, the ith block will not be made
-                        variational. Otherwise, it will be replaced with a
-                        VariationalBlock using the value as [v_method].
+                        IP. Otherwise, it will be replaced with a
+                        IPBlock using the value as [v_method].
 
                         All missing key-value pairs will be added with the value
                         set to False.
-    encoder_kwargs  -- encoder_kwargs of a MaskedVariationalAutoencoder model.
+    encoder_kwargs  -- encoder_kwargs of a MaskedIPAutoencoder model.
                         overrides [kwargs] on conflicting entries.
     global_pool     -- use global pooling or cls token for representations
     num_classes     -- number of classes for classification
@@ -405,10 +405,10 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
         # The architecture [v_mae_model] overrides that in [kwargs] if possible
         kwargs = kwargs | {"num_classes": num_classes}
         kwargs = kwargs if encoder_kwargs is None else kwargs | encoder_kwargs
-        super(VariationalViT, self).__init__(**kwargs)
+        super(IPViT, self).__init__(**kwargs)
 
         self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
-        idx2block = [VariationalBlock(b, vm) if vm else b
+        idx2block = [IPBlock(b, vm) if vm else b
             for b,vm in zip(self.blocks, self.idx2v_method.values())]
         self.idx2block = {str(idx): b for idx,b in enumerate(idx2block)}
         self.idx2block = nn.ModuleDict(self.idx2block)
@@ -496,7 +496,7 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
 
         Args:
         x   -- BSxCxHxW images to compute representations for
-        z   -- list of noises, one for each variational block
+        z   -- list of noises, one for each IP block
         """
         if z is None:
             z = sample_latent_dict(self.latent_spec,
@@ -538,23 +538,23 @@ class VariationalViT(timm.models.vision_transformer.VisionTransformer):
         return self.forward_head(self.forward_features(x, z,
             noise=noise, z_per_ex=z_per_ex, ignore_z=ignore_z))
 
-class VariationalViTBackbone(VariationalViT):
-    """VariationalViT as a backbone network."""
+class IPViTBackbone(IPViT):
+    """IPViT as a backbone network."""
     def __init__(self, **kwargs):
-        super(VariationalViTBackbone, self).__init__(**kwargs)
+        super(IPViTBackbone, self).__init__(**kwargs)
 
     def forward(self, *args, **kwargs):
         return super().forward_features(*args, **kwargs)
 
-class MaskedVAEViT(MaskedAutoencoderViT):
+class MaskedIPViT(MaskedAutoencoderViT):
     """Masked VAE with VisionTransformer backbone.
 
     Args:
     idx2v_method    --  mapping from from indices to the blocks to whether and
-                        how they should be variational. If the ith value in the
+                        how they should be IP. If the ith value in the
                         mapping is False, the ith block will not be made
-                        variational. Otherwise, it will be replaced with a
-                        VariationalBlock using the value as [v_method].
+                        IP. Otherwise, it will be replaced with a
+                        IPBlock using the value as [v_method].
 
                         All missing key-value pairs will be added with the value
                         set to False.
@@ -567,18 +567,18 @@ class MaskedVAEViT(MaskedAutoencoderViT):
     """
     def __init__(self, idx2v_method={}, mae_model=None, **kwargs):
         if mae_model is None:
-            super(MaskedVAEViT, self).__init__(**kwargs)
+            super(MaskedIPViT, self).__init__(**kwargs)
         else:
-            super(MaskedVAEViT, self).__init__(**mae_model.kwargs)
+            super(MaskedIPViT, self).__init__(**mae_model.kwargs)
             self.load_state_dict(mae_model.state_dict(), strict=False)
 
         # Replace the normal ModuleList [blocks] with a dictionary mapping from
-        # block indices to the blocks, with some of the blocks made variational
+        # block indices to the blocks, with some of the blocks made IP
         # (ie. accept a representation and noise as input, and fuse the two in
-        # the output). This is way of adding variationalness can be adapted to
+        # the output). This is way of adding IPness can be adapted to
         # many different architectures.
         self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
-        idx2block = [VariationalBlock(b, vm) if vm else b
+        idx2block = [IPBlock(b, vm) if vm else b
             for b,vm in zip(self.blocks, self.idx2v_method.values())]
         self.idx2block = {str(idx): b for idx,b in enumerate(idx2block)}
         self.idx2block = nn.ModuleDict(self.idx2block)

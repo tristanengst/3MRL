@@ -1,5 +1,5 @@
 """Heavily modified script for linear probing. The key changes are
-(1) This script can work with VariationalViT models, thanks to their ability to
+(1) This script can work with IPViT models, thanks to their ability to
     implement the same API for forward() as ViT models
 (2) Data can be loaded from different kinds of datasets
 
@@ -37,7 +37,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from Augmentation import *
 from Data import *
-from Models import VariationalViT
+from Models import IPViT
 from Utils import *
 
 def get_linear_probe_folder(args, make_folder=True):
@@ -71,7 +71,7 @@ def get_args(args=None):
     P.add_argument("--global_pool", type=int, default=0, choices=[0, 1],
         help="Whether to use global pooling in forming representations")
     P.add_argument("--noise", choices=["zeros", "gaussian"], default="zeros",
-        help="Noise type. Only variational models can use non-zero noise.")
+        help="Noise type. Only IP models can use non-zero noise.")
 
     # Training parameters
     P.add_argument("--batch_size", default=512, type=int,
@@ -174,7 +174,7 @@ def main(args):
             global_pool=args.global_pool)
     elif os.path.exists(args.finetune):
         checkpoint = torch.load(args.finetune, map_location="cpu")
-        model = VariationalViT(encoder_kwargs=checkpoint["encoder_kwargs"],
+        model = IPViT(encoder_kwargs=checkpoint["encoder_kwargs"],
             idx2v_method=checkpoint["idx2v_method"],
             num_classes=data_str_to_num_classes(args.data_tr),
             global_pool=args.global_pool,
@@ -212,10 +212,10 @@ def main(args):
         p.requires_grad = True
 
     model.to(device)
-    # If the model is a VariationalViT, set its latent specification. We can
+    # If the model is a IPViT, set its latent specification. We can
     # then pretend it doesn't exist in subsequent training, so it's fully
     # compatible with existing training code.
-    if isinstance(model, VariationalViT):
+    if isinstance(model, IPViT):
         model.set_latent_spec(mask_ratio=0,
             test_input=torch.ones(4, 3, args.input_size, args. input_size,
                 device=device))

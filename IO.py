@@ -20,6 +20,8 @@ def add_util_args(P):
         help="Folder inside which to save the enclosing folder for the results")
     P.add_argument("--suffix", type=str, default=None,
         help="Optional suffix")
+    P.add_argument("--notes", type=str, default=None,
+        help="Optional notes for model significance")
     P.add_argument("--seed", type=str, default=1701,
         help="Random seed")
     P.add_argument("--uid", type=str, default=None,
@@ -82,6 +84,8 @@ def add_eval_imle_args(P):
         help="Number of epochs between each save")
     P.add_argument("--log_sampling", choices=[0, 1], type=int, default=1,
         help="Whether to log sampling data")
+    P.add_argument("--get_mae_baseline", default=1, choices=[0, 1], type=int,
+        help="Whether to evaluate without codes before training")
     return P
 
 def add_train_imle_args(P):
@@ -116,10 +120,13 @@ def add_train_imle_args(P):
         help="Batch size for sampling")
     P.add_argument("--ns", type=int, default=1024,
         help="Number of latents from which to choose per image for sampling")
+    P.add_argument("--sample_until_better_than_no_z", default=0, type=int,
+        choices=[0, 1],
+        help="Whether to sample until the loss is better than without a code")
     P.add_argument("--sp", type=int, default=4,
         help="Per-image latent code parallelism during sampling")
-    P.add_argument("--ipe", type=int, default=10240,
-        help="Gradient steps per epoch. Always at least the number of steps to see each minibatch once.")
+    P.add_argument("--ipe", type=int, default=1,
+        help="Gradient steps per epoch. Always at least the number of steps to see each minibatch once. At least as worthwhile to tune as the learning rate.")
     P.add_argument("--mask_ratio", type=float, default=.75,
         help="Mask ratio for the model")
     P.add_argument("--mini_bs", type=int, default=128,
@@ -149,7 +156,7 @@ def add_train_imle_args(P):
         help="Base learning rate")
     P.add_argument("--min_lr", type=float, default=0,
         help="Minumum learning rate")
-    P.add_argument("--n_ramp", type=int, default=10,
+    P.add_argument("--n_ramp", type=int, default=0,
         help="Number of epochs of linear learning rate warmup")
 
     # Training arguments for the latent code blocks
