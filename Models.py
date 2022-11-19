@@ -588,7 +588,7 @@ class MaskedIPViT(MaskedAutoencoderViT):
             for z_idx,b_idx in enumerate([
                 b_idx for b_idx,vm in self.idx2v_method.items() if vm])}
 
-        tqdm.write(f"LOG: Constructed MaskedViTVAE model | num_blocks {len(self.idx2block)} | block to latent mapping {self.block_idx2z_idx} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}")
+        tqdm.write(f"{self.__class__.__name__} [num_blocks {len(self.idx2block)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}]")
 
     def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
         """Returns the latent specification for the network. Requires that the

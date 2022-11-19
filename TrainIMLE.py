@@ -321,7 +321,7 @@ def print_and_log_results(data_to_log, args, epoch=0, cur_step=0):
     cur_step    -- the current global training gradient step
     """
     if epoch == "baseline":
-        s = f"BASELINE {'-' * (18 + len(f'{args.epochs}{args.ipe * args.epochs}'))}"
+        s = f"BASELINE {'-' * (19 + len(f'{args.epochs}{args.ipe * args.epochs}'))}"
         image_id_str = "baseline"
     else:
         s = f" EPOCH {epoch+1:4}/{args.epochs} -- Step {cur_step:6}/{args.ipe * args.epochs}"
@@ -644,23 +644,26 @@ if __name__ == "__main__":
             cur_step = epoch * args.ipe + batch_idx
 
             if (cur_step % log_iter == 0
-                or batch_idx % (args.ipe // args.evals_per_epoch) == 0
                 or batch_idx == gradient_steps - 1):
                 
                 data_to_log = {"pretrain/loss_tr": loss.item()}
                 data_to_log |= {f"pretrain/lr_{g}": lr
                     for g,lr in scheduler_to_lrs(scheduler).items()}
-                
-                if (batch_idx == gradient_steps - 1
-                    or (batch_idx > 0
-                    and (batch_idx % (args.ipe // args.evals_per_epoch) == 0
-                        or batch_idx == gradient_steps - 1))):
-                    data_to_log |= validate(model=model,
+                print_and_log_results(data_to_log, args,
+                    epoch=epoch,
+                    cur_step=cur_step)
+            elif (cur_step % args.steps_per_eval == 0
+                and not batch_idx == 0
+                and not epoch == last_epoch + 1):
+
+                data_to_log = {"pretrain/loss_tr": loss.item()}
+                data_to_log |= {f"pretrain/lr_{g}": lr
+                    for g,lr in scheduler_to_lrs(scheduler).items()}
+                data_to_log |= validate(model=model,
                         data_tr=data_tr,
                         data_val=data_val,
                         latent_spec=latent_spec,
                         args=args)
-                
                 print_and_log_results(data_to_log, args,
                     epoch=epoch,
                     cur_step=cur_step)

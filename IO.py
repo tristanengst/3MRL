@@ -78,7 +78,7 @@ def add_eval_imle_args(P):
         help="Whether to do fast linear probing each validation")
     
     # Logging arguments
-    P.add_argument("--evals_per_epoch", type=int, default=1,
+    P.add_argument("--steps_per_eval", type=int, default=4,
         help="Number of evaluations per epoch")
     P.add_argument("--save_iter", type=int, default=-1,
         help="Number of epochs between each save")
