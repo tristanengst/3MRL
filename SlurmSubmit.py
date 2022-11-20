@@ -76,10 +76,10 @@ if __name__ == "__main__":
     ############################################################################
     tqdm.write(f"Will use Python environment setup for cluster {submission_args.cluster}")
     if submission_args.cluster == "cedar":
-        PYTHON_ENV_STR = "module load python/3.9\nsource ~/py310URSA/bin/activate"
+        PYTHON_ENV_STR = "module load python/3.9\nsource ~/py3103MRL/bin/activate"
         GPU_TYPE = "v100l"
     elif submission_args.cluster == "narval":
-        PYTHON_ENV_STR = "conda activate py310URSA"
+        PYTHON_ENV_STR = "conda activate py3103MRL"
         GPU_TYPE = "a100"
     else:
         raise ValueError(f"Unknown cluster {submission_args.cluster}")
