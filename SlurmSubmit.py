@@ -127,7 +127,7 @@ if __name__ == "__main__":
         PARALLEL = "1"
         NUM_GPUS = str(len(args.gpus))
         NAME = model_folder(args, make_folder=False)
-        NAME = NAME.replace(f"{project_dir}/models/", "").replace("/", "_")
+        NAME = NAME.replace(f"{args.save_folder}/models/", "").replace("/", "_")
         
         SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {' '.join(unparsed_args)}"
         
