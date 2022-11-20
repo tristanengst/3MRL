@@ -29,7 +29,7 @@ def model_folder(args, make_folder=False):
     """
     data = os.path.basename(os.path.dirname(args.data_tr.strip("/"))).strip("/")
     v_spec = "_".join(args.v_spec)
-    folder = f"{args.save_folder}/{data}-{args.arch}-bs{args.ex_per_epoch}-epochs{args.epochs}-headstartz{args.headstart_z}-ipe{args.ipe}-lr{args.lr:.2e}-lrz{args.lr_z}-nramp{args.n_ramp}-ns{args.ns}-scheduler{args.scheduler}-vspec{v_spec}-{args.uid}{Misc.suffix_str(args)}"
+    folder = f"{args.save_folder}/models/{data}-{args.arch}-bs{args.ex_per_epoch}-epochs{args.epochs}-headstartz{args.headstart_z}-ipe{args.ipe}-lr{args.lr:.2e}-lrz{args.lr_z}-nramp{args.n_ramp}-ns{args.ns}-scheduler{args.scheduler}-vspec{v_spec}-{args.uid}{Misc.suffix_str(args)}"
 
     if make_folder:
         Misc.conditional_safe_make_directory(folder)
