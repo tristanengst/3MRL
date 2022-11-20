@@ -7,8 +7,6 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.models import resnet18, ResNet18_Weights
 
-from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
-
 from original_code.util.pos_embed import interpolate_pos_embed
 import original_code
 
