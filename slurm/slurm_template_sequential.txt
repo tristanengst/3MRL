@@ -31,7 +31,7 @@ echo "Starting job number $SLURM_ARRAY_TASK_ID"
 
 source ~/.bashrc
 module load python/3.10
-source ~/virtual_envs/py3103MRL
+source ~/virtual_envs/py3103MRL/bin/activate
 
 # Python will buffer output of your script unless you set this.
 export PYTHONUNBUFFERED=1
