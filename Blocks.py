@@ -112,7 +112,7 @@ class AdaIN(nn.Module):
         layers.append(("mapping_net", MLP(in_dim=512,
             h_dim=512,
             layers=8,
-            out_dim=c * 2,
+            out_dim=self.c * 2,
             equalized_lr=True,
             act_type=act_type)))
 
@@ -154,7 +154,7 @@ class LocalAdaIN(nn.Module):
         layers.append(("mapping_net", MLP(in_dim=512,
             h_dim=512,
             layers=8,
-            out_dim=c * 2,
+            out_dim=self.c * 2,
             equalized_lr=True,
             act_type=act_type)))
 
@@ -164,20 +164,30 @@ class LocalAdaIN(nn.Module):
     def get_latent_spec(self, x): return (512,)
 
     def forward(self, x, z):
-        """
+        """Returns the LocalAdaINification of [x] given codes [z]. As the
+        network assumes a fixed number of patches, only cases where [x] has the
+        right number will be scaled; otherwise this functions like an identity
+        function.
+
         Args:
         x   -- image features
         z   -- latent codes
         """
-        z = self.model(z)
-        z_mean = z[:, :self.c]
-        z_std = z[:, self.c:]
+        if x.shape[1] == self.c:
+            z = self.model(z)
+            z_mean = z[:, :self.c]
+            z_std = z[:, self.c:]
 
-        x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
-        z_mean = z_mean.unsqueeze(-1).expand(*x.shape)
-        z_std = z_std.unsqueeze(-1).expand(*x.shape)
-        result = z_mean + x * (1 + z_std)
-        return result
+            x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
+            z_mean = z_mean.unsqueeze(-1).expand(*x.shape)
+            z_std = z_std.unsqueeze(-1).expand(*x.shape)
+            result = z_mean + x * (1 + z_std)
+            return result
+        else:
+            return x
+
+
+        
 
 
 
