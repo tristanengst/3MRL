@@ -16,7 +16,7 @@ def add_util_args(P):
     P.add_argument("--wandb", choices=["disabled", "online", "offline"], 
         default="online",
         help="Type of W&B logging")
-    P.add_argument("--save_folder", default=os.path.basename(os.path.dirname(__file__)),
+    P.add_argument("--save_folder", default="."),
         help="Folder inside which to save the enclosing folder for the results")
     P.add_argument("--suffix", type=str, default=None,
         help="Optional suffix")
@@ -34,7 +34,7 @@ def add_hardware_args(P):
     P.add_argument("--num_workers", type=int, default=20,
         help="Number of DataLoader workers")
     P.add_argument("--fp16", choices=[0, 1], type=int, default=1,
-        help="Whether to use FP16 or FP32 precision training")
+        help="Whether to use FP16 or FP32 precision training. Sampling is always FP16 since we don't need gradients.")
     return P
 
 def add_train_imle_debugging_args(P):
