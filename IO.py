@@ -33,7 +33,7 @@ def add_hardware_args(P):
         help="Device IDs of GPUs to use")
     P.add_argument("--num_workers", type=int, default=20,
         help="Number of DataLoader workers")
-    P.add_argument("--fp16", choices=[0, 1], type=int, default=1,
+    P.add_argument("--fp16", default=True, action=argparse.BooleanOptionalAction,
         help="Whether to use FP16 or FP32 precision training. Sampling is always FP16 since we don't need gradients.")
     return P
 

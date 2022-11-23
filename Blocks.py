@@ -97,11 +97,9 @@ class MLP(nn.Module):
 class AdaIN(nn.Module):
     """AdaIN adapted for a transformer. Expects a BSxNPxC batch of images, where
     each image is represented as a set of P tokens, and BSxPxZ noise. This noise
-    is mapped to be BSxPxC. The standard deviation and mean are taken over the
-    first dimension, giving a BSxC tensors giving a mean and standard deviation.
-    These are used to scale the image patches, ie. in the ith image, the kth
-    element of the jth patch is scaled identically to the kth element of any
-    other patch in that image.
+    is mapped to be BSx1x2C. These are used to scale the image patches, ie. in
+    the ith image, the kth element of the jth patch is scaled identically to the
+    kth element of any other patch in that image.
     """
     def __init__(self, c, epsilon=1e-8, act_type="leakyrelu", normalize_z=True):
         super(AdaIN, self).__init__()
@@ -136,6 +134,48 @@ class AdaIN(nn.Module):
         x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
         z_mean = z_mean.unsqueeze(1).expand(*x.shape)
         z_std = z_std.unsqueeze(1).expand(*x.shape)
+        result = z_mean + x * (1 + z_std)
+        return result
+
+class LocalAdaIN(nn.Module):
+    """AdaIN adapted for a transformer. Expects a BSxNPxC batch of images, where
+    each image is represented as a set of P tokens, and BSxPxZ noise. This noise
+    is mapped to be BSxNPx2. These are used to scale the image patches, ie. each
+    patch is scaled and shifted by a (very likely) different amount.
+    """
+    def __init__(self, c, epsilon=1e-8, act_type="leakyrelu", normalize_z=True):
+        super(LocalAdaIN, self).__init__()
+        self.register_buffer("epsilon", torch.tensor(epsilon))
+        self.c = c
+
+        layers = []
+        if normalize_z:
+            layers.append(("normalize_z", PixelNormLayer(epsilon=epsilon)))
+        layers.append(("mapping_net", MLP(in_dim=512,
+            h_dim=512,
+            layers=8,
+            out_dim=c * 2,
+            equalized_lr=True,
+            act_type=act_type)))
+
+        self.model = nn.Sequential(OrderedDict(layers))
+
+        
+    def get_latent_spec(self, x): return (512,)
+
+    def forward(self, x, z):
+        """
+        Args:
+        x   -- image features
+        z   -- latent codes
+        """
+        z = self.model(z)
+        z_mean = z[:, :self.c]
+        z_std = z[:, self.c:]
+
+        x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
+        z_mean = z_mean.unsqueeze(-1).expand(*x.shape)
+        z_std = z_std.unsqueeze(-1).expand(*x.shape)
         result = z_mean + x * (1 + z_std)
         return result
 

@@ -16,7 +16,7 @@ from original_code.models_vit import VisionTransformer
 from original_code.util import pos_embed as PE
 
 from Utils import *
-from Blocks import AdaIN
+from Blocks import AdaIN, LocalAdaIN
 from Augmentation import de_normalize
 
 class MaskedAutoencoderViT(nn.Module):
@@ -295,8 +295,6 @@ def parse_ip_spec(args):
     def parse_v_spec_helper(s):
         if s in ["add", "zero"] or not s:
             return s
-        elif s.startswith("AdaIN"):
-            return AdaIN()
         elif s.startswith("adain"):
             if "base" in args.arch:
                 return AdaIN(c=768, act_type=args.act_type)
@@ -304,6 +302,8 @@ def parse_ip_spec(args):
                 return AdaIN(c=1024, act_type=args.act_type)
             else:
                 raise NotImplementedError()
+        elif s.startswith("local_adain"):
+            return LocalAdaIN(c=50, act_type=args.act_type)
         else:
             raise NotImplementedError()
 
