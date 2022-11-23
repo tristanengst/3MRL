@@ -33,7 +33,7 @@ def add_hardware_args(P):
         help="Device IDs of GPUs to use")
     P.add_argument("--num_workers", type=int, default=20,
         help="Number of DataLoader workers")
-    P.add_argument("--fp16", default=[0, 1], type=int, default=1,
+    P.add_argument("--fp16", choices=[0, 1], type=int, default=1,
         help="Whether to use FP16 or FP32 precision training")
     return P
 
