@@ -10,7 +10,10 @@ def get_arg_names_from_fn(fn):
 
 
 def argparse_file_type(x):
-    return x if os.path.exists(x) or x.startswith("$") else False
+    if os.path.exists(x) or x.startswith("$"):
+        return x
+    else:
+        raise FileNotFoundError(x)
 
 def add_util_args(P):
     P.add_argument("--wandb", choices=["disabled", "online", "offline"], 
