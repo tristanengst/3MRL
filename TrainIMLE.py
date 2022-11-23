@@ -643,16 +643,8 @@ if __name__ == "__main__":
 
             cur_step = epoch * args.ipe + batch_idx
 
-            if (cur_step % log_iter == 0
-                or batch_idx == gradient_steps - 1):
-                
-                data_to_log = {"pretrain/loss_tr": loss.item()}
-                data_to_log |= {f"pretrain/lr_{g}": lr
-                    for g,lr in scheduler_to_lrs(scheduler).items()}
-                print_and_log_results(data_to_log, args,
-                    epoch=epoch,
-                    cur_step=cur_step)
-            elif (cur_step % args.steps_per_eval == 0
+            
+            if (cur_step % args.steps_per_eval == 0
                 and not (batch_idx == 0 and epoch == last_epoch + 1)):
 
                 data_to_log = {"pretrain/loss_tr": loss.item()}
@@ -663,6 +655,15 @@ if __name__ == "__main__":
                         data_val=data_val,
                         latent_spec=latent_spec,
                         args=args)
+                print_and_log_results(data_to_log, args,
+                    epoch=epoch,
+                    cur_step=cur_step)
+            elif (cur_step % log_iter == 0
+                or batch_idx == gradient_steps - 1):
+                
+                data_to_log = {"pretrain/loss_tr": loss.item()}
+                data_to_log |= {f"pretrain/lr_{g}": lr
+                    for g,lr in scheduler_to_lrs(scheduler).items()}
                 print_and_log_results(data_to_log, args,
                     epoch=epoch,
                     cur_step=cur_step)
