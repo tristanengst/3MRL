@@ -580,7 +580,7 @@ if __name__ == "__main__":
     ############################################################################
     # Begin training
     ############################################################################        
-    scaler = torch.cuda.amp.GradScaler(init_scale=1)
+    scaler = torch.cuda.amp.GradScaler(init_scale=1, enabled=args.fp16)
     log_iter = max(1, int((args.epochs - (last_epoch + 1)) * args.ipe / 10000))
     tqdm.write(f"LOG: Will log every {log_iter} gradient steps")
     
@@ -629,7 +629,7 @@ if __name__ == "__main__":
             total=gradient_steps,
             leave=False):
 
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(enabled=args.fp16):
                 loss = model(x, z,
                     mask_ratio=args.mask_ratio,
                     ignore_z=args.ignore_z)
