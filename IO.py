@@ -16,7 +16,7 @@ def add_util_args(P):
     P.add_argument("--wandb", choices=["disabled", "online", "offline"], 
         default="online",
         help="Type of W&B logging")
-    P.add_argument("--save_folder", default=f"~/{os.path.abspath(os.path.dirname(__file__))}",
+    P.add_argument("--save_folder", default=f"~{os.path.abspath(os.path.dirname(__file__))}",
         help="Folder inside which to save the enclosing folder for the results")
     P.add_argument("--suffix", type=str, default=None,
         help="Optional suffix")
