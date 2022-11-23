@@ -411,7 +411,7 @@ def get_masked_ipvit_model(args):
     model = model.to(torch.float32)
     return model
 
-def get_model_optimizer(args):
+def get_model_optimizer(args, resume_optimizer=False):
     """Returns a (model, optimizer) tuple where [model] is the model to be
     trained and [optimizer] is its optimizer given [args]. This function
     supports resuming old models and moving to the device.
@@ -438,7 +438,7 @@ def get_model_optimizer(args):
         betas=(args.beta1, args.beta2),
         weight_decay=args.wd)
     
-    if args.resume is not None:
+    if args.resume is not None and resume_optimizer:
         optimizer.load_state_dict(resume["optimizer"])
     
     return model, optimizer
@@ -475,18 +475,18 @@ if __name__ == "__main__":
             keep_args = {k: v for k,v in vars(args).items() if k in keep_args}
             args.__dict__.update(vars(old_args) | keep_args)
 
-            model, optimizer = get_model_optimizer(args)
-            kkm = KOrKMinusOne.from_state_dict(resume["kkm"])
+            model, optimizer = get_model_optimizer(args, resume_optimizer=True)
             wandb.init(id=args.uid, resume="must", mode=args.wandb,
                 project="3MRL", config=args,
                 name=os.path.basename(model_folder(args)))
         else:
             args.arch = old_args.arch
-            model, optimizer = get_model_optimizer(args)
+            model, optimizer = get_model_optimizer(args, resume_optimizer=False)
             wandb.init(anonymous="allow", id=args.uid, config=args,
                 mode=args.wandb, project="3MRL",
                 name=os.path.basename(model_folder(args)))
 
+        kkm = KOrKMinusOne.from_state_dict(resume["kkm"])
         last_epoch = resume["last_epoch"]
         last_step = last_epoch * old_args.ipe + old_args.ipe
 
