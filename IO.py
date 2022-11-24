@@ -54,7 +54,7 @@ def add_linear_probe_args(P):
         help="Linear probe training batch size")
     P.add_argument("--probe_bs_val", type=int, default=256,
         help="Linear probe test/data gathering batch size")
-    P.add_argument("--val_n_way", type=int, default=100,
+    P.add_argument("--val_n_way", type=int, default=32,
         help="Number of classes in probe/finetune data")
     P.add_argument("--val_n_shot", type=int, default=100,
         help="Number of examples per class in probe/finetune data")
@@ -69,7 +69,7 @@ def add_linear_probe_args(P):
     return P
 
 def add_eval_imle_args(P):
-    P.add_argument("--ex_for_mse_loss", type=int, default=512,
+    P.add_argument("--ex_for_mse_loss", type=int, default=2048,
         help="Number of examples for the fast linear probe")
     P.add_argument("--ex_for_vis_tr", default=8,
         help="Number of training examples for logging")
@@ -107,10 +107,10 @@ def add_train_imle_args(P):
         help="Whether to finetune an existing MAE model or train from scratch")
     P.add_argument("--ignore_z", choices=[0, 1], type=int, default=0,
         help="Whether to not use IMLE")
-    P.add_argument("--data_tr", default="data/imagenet/train.tar", 
+    P.add_argument("--data_tr", default="../Data/imagenet/train", 
         type=argparse_file_type,
         help="String specifying training data")
-    P.add_argument("--data_val", default="data/imagenet/val.tar", 
+    P.add_argument("--data_val", default="../Data/imagenet/val", 
         type=argparse_file_type,
         help="String specifying finetuning data")
     P.add_argument("--train_n_way", type=int, default=-1,
@@ -119,22 +119,22 @@ def add_train_imle_args(P):
         help="Number of examples per class in generative modeling data")
 
     # Shared training arguments between the MAE architecture and latent codes
-    P.add_argument("--ex_per_epoch", type=int, default=512,
+    P.add_argument("--ex_per_epoch", type=int, default=2048,
         help="Number of examples to use in each sampling")
-    P.add_argument("--code_bs", type=int, default=4,
+    P.add_argument("--code_bs", type=int, default=32,
         help="Batch size for sampling")
-    P.add_argument("--ns", type=int, default=1024,
+    P.add_argument("--ns", type=int, default=128,
         help="Number of latents from which to choose per image for sampling")
     P.add_argument("--sample_until_better_than_no_z", default=0, type=int,
         choices=[0, 1],
         help="Whether to sample until the loss is better than without a code")
-    P.add_argument("--sp", type=int, default=4,
+    P.add_argument("--sp", type=int, default=64,
         help="Per-image latent code parallelism during sampling")
-    P.add_argument("--ipe", type=int, default=1,
+    P.add_argument("--ipe", type=int, default=64,
         help="Gradient steps per epoch. Always at least the number of steps to see each minibatch once. At least as worthwhile to tune as the learning rate.")
     P.add_argument("--mask_ratio", type=float, default=.75,
         help="Mask ratio for the model")
-    P.add_argument("--mini_bs", type=int, default=128,
+    P.add_argument("--mini_bs", type=int, default=32,
         help="Batch size for training")
     P.add_argument("--norm_pix_loss", type=int, default=1, choices=[0, 1],
         help="Whether to predict normalized pixels")
@@ -148,14 +148,14 @@ def add_train_imle_args(P):
         help="AdamW beta2")
     P.add_argument("--wd", type=float, default=.01,
         help="AdamW weight decay")
-    P.add_argument("--scheduler", default="linear_ramp",
+    P.add_argument("--scheduler", default="constant",
         choices=["linear_ramp", "linear_ramp_cosine_decay", "constant"],
         help="Which scheduler to use")
     P.add_argument("--headstart_z", type=int, default=0,
         help="Number of epochs to only train z parameters")
 
     # Training arguments for the MAE architecture
-    P.add_argument("--epochs", type=int, default=64,
+    P.add_argument("--epochs", type=int, default=1024,
         help="Number of sampling/training steps to run")
     P.add_argument("--lr", type=float, default=1e-4,
         help="Base learning rate")

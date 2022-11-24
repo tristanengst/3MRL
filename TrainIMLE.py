@@ -21,6 +21,21 @@ from IO import *
 from Models import *
 from Utils import *
 
+def save_state(model, optimizer, scheduler, kkm, epoch, args, baseline=dict()):
+    """Saves input training utilities."""
+    torch.save({"model": de_dataparallel(model).cpu().state_dict(),
+        "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
+        "idx2v_method": de_dataparallel(model).idx2v_method,
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler,
+        "args": args,
+        "last_epoch": epoch,
+        "kkm": kkm.state_dict(),
+        "baseline": baseline},
+        f"{model_folder(args, make_folder=True)}/{epoch}.pt")
+    model = model.to(device)
+    tqdm.write(f"Saved training state to {model_folder(args)}/{epoch}.pt")
+
 def model_folder(args, make_folder=False):
     """Returns the folder to which to save a model built with [args].
     
@@ -297,84 +312,117 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
         "images/pretrain_train": images_to_pil_image(images_tr),
         "images/pretrain_test": images_to_pil_image(images_te)}
 
+def get_masked_ipvit_model(args):
+    """Returns an MaskedIPViT model with the weights and architecture of an MAE
+    model specified in [args. Resuming a MaskedIPViT model is not handeled, ie.
+    the model weights are pure MAE weights.
+    """
+    # Instantiate the MAE model we're finetuning
+    if args.arch == "vit_base":
+        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_base_full.pth")["model"]
+        mae = mae_vit_base_patch16(norm_pix_loss=args.norm_pix_loss)
+    elif args.arch == "vit_large":
+        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_large_full.pth")["model"]
+        mae = mae_vit_large_patch16(norm_pix_loss=args.norm_pix_loss)
+    else:
+        raise NotImplementedError()
+    mae.load_state_dict(mae_model_state)
+    model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
+    model = MaskedIPViT(parse_ip_spec(args), **model_kwargs)
+    model = model.to(torch.float32)
+    return model
 
-def save_state(model, optimizer, scheduler, kkm, epoch, args, baseline=dict()):
-    """Saves input training utilities."""
-    torch.save({"model": de_dataparallel(model).cpu().state_dict(),
-        "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
-        "idx2v_method": de_dataparallel(model).idx2v_method,
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler,
-        "args": args,
-        "last_epoch": epoch,
-        "kkm": kkm.state_dict(),
-        "baseline": baseline},
-        f"{model_folder(args, make_folder=True)}/{epoch}.pt")
-    model = model.to(device)
-    tqdm.write(f"Saved training state to {model_folder(args)}/{epoch}.pt")
+def get_model_optimizer(args, resume_optimizer=False):
+    """Returns a (model, optimizer) tuple where [model] is the model to be
+    trained and [optimizer] is its optimizer given [args]. This function
+    supports resuming old models and moving to the device.
+    """
+    model = get_masked_ipvit_model(args)
+    if args.resume is not None:
+        old_state = torch.load(args.resume)["model"]
+        model.load_state_dict(old_state)
 
-def print_and_log_results(data_to_log, args, epoch=0, cur_step=0):
-    """Prints and logs results [data_to_log]. 
+    model = nn.DataParallel(model, device_ids=args.gpus).to(device)
 
+    params_z = [v for p,v in model.named_parameters()
+            if "v_method" in p]
+    params_mae = [v for p,v in model.named_parameters()
+            if not "v_method" in p]
+    optimizer = AdamW([{"params": params_z,
+        "lr": args.lr_z,
+        "initial_lr": 0,
+        "name": "params_z"},
+        {"params": params_mae,
+        "lr": args.lr,
+        "initial_lr": 0,
+        "name": "params_mae"}],
+        betas=(args.beta1, args.beta2),
+        weight_decay=args.wd)
+    
+    if args.resume is not None and resume_optimizer:
+        optimizer.load_state_dict(resume["optimizer"])
+    
+    return model, optimizer
+
+
+def print_and_log_results(results, args, epoch=0, cur_step=0, baseline=False):
+    """Prints and logs results [results].
+    
     Args:
-    data_to_log -- dictionary of things to log for the time step corresponding
-                    to [cur_step]. This should include values from any
-                    baselines, which should include the substring 'baseline'
-                    in their key
-    args        -- argparse Namespace for training
-    epoch       -- index of the current epoch or 'baseline'
-    cur_step    -- the current global training gradient step
+    results     -- dictionary of results to log. Keys containing the substring
+                    'baseline' are logged and printed only if [baseline] is True
+    args        -- Namespace with parameters for training
+    epoch       -- the current epoch of training
+    cur_step    -- the current gradient step of training
+    baseline    -- whether the results being logged contain only baselines
     """
     save_dir = model_folder(args)
     Misc.conditional_safe_make_directory(f"{save_dir}/images")
+    cur_step = max(epoch * args.ipe, cur_step)
 
-    # Build a new dictionary similar to [data_to_log] but with images changed to
-    # WandB images and with everything copied so we can modify it. This is
-    # unfortunately state-based.
-    data = {}
-    for k,v in data_to_log.items():
-        if "images" in k and "baseline" in k and not isinstance(v, wandb.Image):
-            file_name = k.replace("images/", f"images/baseline")
+    # Save images and store them in a dictionary that will be logged later.
+    images = {k: v for k,v in results.items() if "images" in k}
+    log_images = {}
+    for k,v in images.items():
+        if "baseline" in k and baseline:
+            file_name = k.replace("images/", f"images/baseline_")
             v.save(f"{save_dir}/{file_name}.png")
-            data[k] = wandb.Image(deepcopy(v))
-        elif "images" in k and not "baseline" in k:
+            log_images[k] = wandb.Image(v)
+        elif "baseline" in k and not baseline:
+            continue # This image has already been saved and logged
+        else:
             file_name = k.replace("images/", f"images/{epoch+1}_{cur_step % args.ipe}")
             v.save(f"{save_dir}/{file_name}.png")
-            data[k] = wandb.Image(deepcopy(v))
-        else:
-            data[k] = deepcopy(v)
+            log_images[k] = wandb.Image(v)
 
-    # Log everything to WandB. Baseline images are logged with a step of -1 and
-    # logged only if [epoch] is 'baseline', which should occur only when we log
-    # the baseline.
-    baseline_images = {k: v for k,v in data.items()
-        if "images" in k and "baseline" in k}
-    if epoch == "baseline":
-        wandb.log(baseline_images, step=-1)
-    else:
-        data = {k: v for k,v in data.items() if not k in baseline_images}
-        wandb.log(data | {"pretrain/step": cur_step, "epoch": epoch})
-    
-    # Print string describing training so far. Remove baseline stats from the
-    # string unless [epoch] is set to 'baseline'.
-    if epoch == "baseline":
+    # Log the non-image results and the images that were saved earlier. Baseline
+    # images are logged only if [baseline] is True.
+    results = {k: v for k,v in results.items() if not "images" in k}
+
+
+    assert epoch > 0
+
+    wandb.log(results | {"pretrain/step": cur_step, "epoch": epoch} | log_images)
+
+    if baseline:
         s = f"BASELINE {'-' * (19 + len(f'{args.epochs}{args.ipe * args.epochs}'))}"
+        results = {k: v for k,v in results.items() if "baseline" in k}
+        results = {k.replace("_baseline", ""): v for k,v in results.items()}
     else:
         s = f" EPOCH {epoch+1:4}/{args.epochs} -- Step {cur_step:6}/{args.ipe * args.epochs}"
-        data = {k: v for k,v in data.items() if not "baseline" in k}
+        results = {k: v for k,v in results.items() if not "baseline" in k}
 
-    for k,v in sorted(data.items()):
+    for k,v in sorted(results.items()):
         s += f" | {k} {v:.3e}".replace("_params", "") if "lr" in k else ""
-    for k,v in sorted(data.items(), reverse=True):
+    for k,v in sorted(results.items(), reverse=True):
         s += f" | {k} {v:.5f}" if "loss" in k else ""
-    
-    if "fast_linear_probe/acc_te" in data:
-        s += f" | fast_linear_probe/acc_te {data['fast_linear_probe/acc_te']:.5f}"
+    for k,v in results.items():
+        if "fast_linear_probe/acc_te" in k:
+            s += f" | fast_linear_probe/acc_te {results[k]:.5f}"
 
     s = s.replace("pretrain/", "")
     tqdm.write(s)
     
-
 def get_args(args=None):
     """Returns parsed arguments, either from [args] or standard input."""
     P = argparse.ArgumentParser()
@@ -409,58 +457,7 @@ def get_args(args=None):
 
     return args
 
-def get_masked_ipvit_model(args):
-    """Returns an MaskedIPViT model with the weights and architecture of an MAE
-    model specified in [args. Resuming a MaskedIPViT model is not handeled, ie.
-    the model weights are pure MAE weights.
-    """
-    # Instantiate the MAE model we're finetuning
-    if args.arch == "vit_base":
-        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_base_full.pth")["model"]
-        mae = mae_vit_base_patch16(norm_pix_loss=args.norm_pix_loss)
-    elif args.arch == "vit_large":
-        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_large_full.pth")["model"]
-        mae = mae_vit_large_patch16(norm_pix_loss=args.norm_pix_loss)
-    else:
-        raise NotImplementedError()
-    mae.load_state_dict(mae_model_state)
-    model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
-    model = MaskedIPViT(parse_ip_spec(args), **model_kwargs)
 
-    model = model.to(torch.float32)
-    return model
-
-def get_model_optimizer(args, resume_optimizer=False):
-    """Returns a (model, optimizer) tuple where [model] is the model to be
-    trained and [optimizer] is its optimizer given [args]. This function
-    supports resuming old models and moving to the device.
-    """
-    model = get_masked_ipvit_model(args)
-    if args.resume is not None:
-        old_state = torch.load(args.resume)["model"]
-        model.load_state_dict(old_state)
-
-    model = nn.DataParallel(model, device_ids=args.gpus).to(device)
-    
-    params_z = [v for p,v in model.named_parameters()
-            if "v_method" in p]
-    params_mae = [v for p,v in model.named_parameters()
-            if not "v_method" in p]
-    optimizer = AdamW([{"params": params_z,
-        "lr": args.lr_z,
-        "initial_lr": 0,
-        "name": "params_z"},
-        {"params": params_mae,
-        "lr": args.lr,
-        "initial_lr": 0,
-        "name": "params_mae"}],
-        betas=(args.beta1, args.beta2),
-        weight_decay=args.wd)
-    
-    if args.resume is not None and resume_optimizer:
-        optimizer.load_state_dict(resume["optimizer"])
-    
-    return model, optimizer
 
 if __name__ == "__main__":
     args = get_args()
@@ -581,14 +578,13 @@ if __name__ == "__main__":
         scheduler = NoChangeScheduler(optimizer, last_epoch=last_epoch)
     else:
         raise NotImplementedError()
-
     tqdm.write(f"SCHEDULER\n{scheduler}")
 
     ############################################################################
     # If desired, evaluate with plain MAE. This is important as it gives the
     # baseline we want to improve from. We log these with a step of -1.
     ############################################################################
-    if args.get_mae_baseline:
+    if args.get_mae_baseline and args.resume is None:
         baseline = validate(model=nn.DataParallel(get_masked_ipvit_model(args),
                 device_ids=args.gpus).to(device),
             data_tr=data_tr,
@@ -597,7 +593,7 @@ if __name__ == "__main__":
             args=args,
             ignore_z=True)
         baseline = {f"{k}_baseline": v for k,v in baseline.items()}
-        print_and_log_results(baseline, args, epoch="baseline")
+    print_and_log_results(baseline, args, epoch=last_epoch + 1, baseline=True)
 
     ############################################################################
     # Begin training
@@ -620,7 +616,9 @@ if __name__ == "__main__":
                 data_val=data_val,
                 latent_spec=latent_spec,
                 args=args)
-            print_and_log_results(data_to_log | baseline, args, epoch=last_epoch)
+            print_and_log_results(data_to_log | baseline, args,
+                epoch=last_epoch,
+                cur_step=last_epoch * args.ipe + args.ipe)
 
         # Sample latent codes and create the DataLoader for the epoch
         batch_data_tr = Subset(data_tr, indices=kkm.pop_k(args.ex_per_epoch))
@@ -635,9 +633,9 @@ if __name__ == "__main__":
             persistent_workers=True)
         num_passes_over_loader = max(1, args.ipe // len(loader))
         batch_loader = chain(*[loader] * num_passes_over_loader)
+        gradient_steps = num_passes_over_loader * len(loader)
 
         # Print string signalling start of the epoch's training
-        gradient_steps = num_passes_over_loader * len(loader)
         tqdm.write(f"Epoch {epoch+1:4}/{args.epochs} | gradient steps {gradient_steps} | each example appears {num_passes_over_loader} times")
 
         ########################################################################
