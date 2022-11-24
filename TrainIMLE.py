@@ -398,10 +398,6 @@ def print_and_log_results(results, args, epoch=0, cur_step=0, baseline=False):
     # Log the non-image results and the images that were saved earlier. Baseline
     # images are logged only if [baseline] is True.
     results = {k: v for k,v in results.items() if not "images" in k}
-
-
-    assert epoch > 0
-
     wandb.log(results | {"pretrain/step": cur_step, "epoch": epoch} | log_images)
 
     if baseline:
