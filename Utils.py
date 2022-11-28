@@ -39,7 +39,7 @@ def de_dataparallel(net):
     """
     return net.module if isinstance(net, nn.DataParallel) else net
 
-def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
+def sample_latent_dict(d, bs=1, device=device, noise="gaussian", args=None):
     """Returns dictionary [d] after mapping all its values that are tuples of
     integers to Gaussian noise tensors with shapes given by the tuples.
 
@@ -54,25 +54,34 @@ def sample_latent_dict(d, bs=1, device=device, noise="gaussian"):
                 key-value pairs
     bs      -- the batch size to use for each tensor if 'k_bs' isn't in [d]
     device  -- the device to return all tensors on
-    noise   -- the type of noise if for key [k] if 'k_noise_type' isn't in [d]
+    noise   -- noise type that overrides args.noise
+    args    -- Namespace with --noise (default noise that can be overrriden),
+                --fix_mask_noise and --seed parameters
     """
     def get_sample(key, dims):
         if dims is None:
             dims = ()
 
-        noise_ = d[f"{key}_noise_type"] if f"{key}_noise_type" in d else noise
+        default_noise = args.noise if noise is None else noise
+        noise_ = d[f"{key}_noise_type"] if f"{key}_noise_type" in d else default_noise
         bs_ = d[f"{key}_bs"] if f"{key}_bs" in d else bs
 
+        # Sometimes for the masks we want to fix the latent seed
+        if "mask" in key and not args is None and args.fix_mask_noise:
+            gen = torch.Generator(device=device).manual_seed(args.seed)
+        else:
+            gen = None
+
         if noise_ == "gaussian":
-            return torch.randn(*((bs_,) + dims), device=device)
+            return torch.ones(*((bs_,) + dims), device=device).normal_(generator=gen)
         elif noise_ == "ones":
             return torch.ones(*((bs_,) + dims), device=device)
         elif noise_ == "zeros":
             return torch.zeros(*((bs_,) + dims), device=device)
         elif noise_ == "uniform":
-            return torch.rand(*((bs_,) + dims), device=device)
+            return torch.ones(*((bs_,) + dims), device=device).uniform_(generator=gen)            
         else:
-            raise NotImplementedError(f"Unknown noise '{noise}'")
+            raise NotImplementedError(f"Unknown noise '{noise_}'")
 
     return {k: get_sample(k, v) for k,v in d.items()
         if not k.endswith("_noise_type") and not k.endswith("_bs")}

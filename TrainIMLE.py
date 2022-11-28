@@ -130,7 +130,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
         initial_codes = sample_latent_dict(latent_spec,
             bs=len(dataset),
             device="cpu",
-            noise=args.noise)
+            args=args)
         best_latents = initial_codes["latents"]
         mask_noise = initial_codes["mask_noise"]
         latents_only_spec = {"latents": latent_spec["latents"]}
@@ -163,7 +163,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
 
                 latents = sample_latent_dict(latents_only_spec,
                     bs=bs * args.sp,
-                    noise=args.noise)
+                    args=args)
                 z = {"mask_noise": mask_noise[start:stop]} | latents
                 
                 with torch.cuda.amp.autocast():
@@ -241,7 +241,7 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
 
                 bs_spec = {"mask_noise_bs": len(x),
                     "latents_bs": len(x) * z_per_ex}
-                z = sample_latent_dict(latent_spec | bs_spec, noise=args.noise)
+                z = sample_latent_dict(latent_spec | bs_spec, args=args)
                 with torch.cuda.amp.autocast():
                     loss, pred, mask = model(x, z,
                         mask_ratio=args.mask_ratio,
@@ -287,7 +287,7 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
         val_ignore_z=val_ignore_z)
 
     idxs_tr = Misc.sample(range(len(data_tr)),
-        k=args.ex_for_vis_tr,
+        k=min(args.ex_for_vis_tr, len(data_tr)),
         seed=args.seed)
     _, images_tr = get_reconstruction_images_loss(model,
         Subset(data_tr, indices=idxs_tr),
@@ -297,7 +297,7 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
         val_ignore_z=val_ignore_z)
     
     idxs_te = Misc.sample(range(len(data_val)),
-        k=args.ex_for_vis_te,
+        k=min(args.ex_for_vis_te, len(data_val)),
         seed=args.seed)
     _, images_te = get_reconstruction_images_loss(model,
         Subset(data_val, indices=idxs_te),

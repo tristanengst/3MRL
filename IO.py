@@ -25,7 +25,7 @@ def add_util_args(P):
         help="Optional suffix")
     P.add_argument("--notes", type=str, default=None,
         help="Optional notes for model significance")
-    P.add_argument("--seed", type=str, default=1701,
+    P.add_argument("--seed", type=int, default=1701,
         help="Random seed")
     P.add_argument("--uid", type=str, default=None,
         help="WandB UID")
@@ -107,6 +107,8 @@ def add_train_imle_args(P):
         help="Whether to finetune an existing MAE model or train from scratch")
     P.add_argument("--ignore_z", choices=[0, 1], type=int, default=0,
         help="Whether to not use IMLE")
+    P.add_argument("--fix_mask_noise", choices=[0, 1], type=int, default=0,
+        help="Whether to fix the seed for generating masks to --seed")
     P.add_argument("--data_tr", default="../Data/imagenet/train", 
         type=argparse_file_type,
         help="String specifying training data")
