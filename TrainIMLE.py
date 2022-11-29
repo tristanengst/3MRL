@@ -131,6 +131,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
             bs=len(dataset),
             device="cpu",
             args=args)
+
         best_latents = initial_codes["latents"]
         mask_noise = initial_codes["mask_noise"]
         latents_only_spec = {"latents": latent_spec["latents"]}
