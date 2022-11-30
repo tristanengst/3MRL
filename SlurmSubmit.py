@@ -165,7 +165,6 @@ if __name__ == "__main__":
     template = template.replace("NUM_GPUS", NUM_GPUS)
     template = template.replace("PARALLEL", PARALLEL)
     template = template.replace("ACCOUNT", submission_args.account)
-    template = template.replace("PYTHON_ENV_STR", PYTHON_ENV_STR)
     template = template.replace("GPU_TYPE", GPU_TYPE)
     slurm_script = f"slurm/{NAME}.sh"
 
