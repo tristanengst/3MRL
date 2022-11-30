@@ -61,7 +61,7 @@ if __name__ == "__main__":
         help="Index of last chunk to run, with zero-indexing")
     P.add_argument("--start_chunk", default=0, type=int,
         help="Index of the chunk to resume from, ie. where there was an error")
-    P.add_argument("--cluster", choices=["narval", "cedar"], default="narval",
+    P.add_argument("--cluster", choices=["narval", "cedar", "beluga"], default="narval",
         help="Cluster on which the jobs are submitted")
     P.add_argument("--nproc_per_node", type=int, default=4,
         help="Number of GPUs per node")
