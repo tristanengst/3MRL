@@ -19,7 +19,7 @@ import Misc
 
 # I don't think this does anything because we don't have convolutions, but it
 # probably can't hurt
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 plt.rcParams["savefig.bbox"] = "tight"
