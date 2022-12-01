@@ -438,8 +438,6 @@ def get_args(args=None):
 
     if args.scheduler == "constant" and not args.n_ramp == 0:
         raise ValueError(f"Can not ramp constant scheduler. Set --n_ramp to zero")
-    if args.scheduler == "linear_ramp_cosine_decay" and not args.headstart_z == 0:
-        raise ValueError(f"Can not headstart the mapping network with this scheduler")
 
     if len(args.v_spec) == 0:
         tqdm.write(f"WARNING: empty --v_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
