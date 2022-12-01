@@ -266,6 +266,77 @@ class LinearRampScheduler(_LRScheduler):
 
     def __str__(self): return f"LinearRampScheduler [global_step {self.global_step} | min_lr {self.min_lr} | warmup_steps {self.warmup_steps}\n\tpg2step {self.pg2step} | pg2start_step {self.pg2start_step}\n\tlr_inc_per_step {self.lr_inc_per_step}\n\tlrs {self.get_lr()}]"
 
+class LinearRampCosineDecayScheduler(_LRScheduler):
+
+    def __init__(self, optimizer, warmup_steps=0, total_steps=1, last_epoch=-1, min_lr=0,
+        pg2base_lrs=1e-3, pg2start_step=None, verbose=True):
+
+        if warmup_steps == 0:
+            raise ValueError(f"LinearRampCosineDecayScheduler requires 'warmup_steps' > 0")
+        self.global_step = last_epoch
+        self.min_lr = min_lr
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+
+        # Index of step on which a parameter group can start having a non-zero
+        # learning
+        if pg2start_step is None:
+            self.pg2start_step = {p["name"]: 0 for p in optimizer.param_groups}
+        else:
+            self.pg2start_step = pg2start_step
+
+        # Number of steps for each parameter group so far
+        if last_epoch == -1:
+            self.pg2step = {pg["name"]: 1 for pg in optimizer.param_groups}
+        else:
+            self.pg2step = {pg["name"]: max(1, (last_epoch - pg2start_step[pg["name"]]))
+                for pg in optimizer.param_groups}
+
+        # Set base learning rates
+        if isinstance(pg2base_lrs, float):
+            self.pg2base_lrs = {pg["name"]: pg2base_lrs for pg in optimizer.param_groups}
+        else:
+            self.pg2base_lrs = pg2base_lrs
+
+        # Amount to increase the learning rate of each parameter group per step
+        # during its ramp
+        if isinstance(pg2base_lrs, float):
+            self.lr_inc_per_step = {pg["name"]: pg2base_lrs - min_lr
+                for pg in optimizer.param_groups}
+        elif isinstance(pg2base_lrs, dict):
+            self.lr_inc_per_step = {pg["name"]: pg2base_lrs[pg["name"]] - min_lr
+                for pg in optimizer.param_groups}
+        else:
+            raise NotImplementedError()
+
+        self.lr_inc_per_step = {pgn: inc / warmup_steps
+            for pgn,inc in self.lr_inc_per_step.items()}
+
+        super(LinearRampCosineDecayScheduler, self).__init__(optimizer,
+            last_epoch=-1, # Prevent the base class from being weird
+            verbose=verbose)
+
+    def get_lr(self): return {pg["name"]: pg["lr"] for pg in self.optimizer.param_groups}
+
+    def step(self):
+        for pg in self.optimizer.param_groups:
+            if self.global_step < self.pg2start_step[pg["name"]]:     
+                pg["lr"] = 0
+            else:
+                if self.pg2step[pg["name"]] <= self.warmup_steps:
+                    pg["lr"] = self.pg2step[pg["name"]] * self.lr_inc_per_step[pg["name"]] + self.min_lr
+                    self.pg2step[pg["name"]] += 1
+                else:
+                    cosine_step_idx =  self.pg2step[pg["name"]] + self.pg2start_step[pg["name"]]
+                    cosine_scaling = .5 + .5 * math.cos(math.pi * cosine_step_idx / self.total_steps)
+                    pg["lr"] = cosine_scaling * self.pg2base_lrs[pg["name"]]
+                    self.pg2step[pg["name"]] += 1
+
+        self.global_step += 1
+
+    def __str__(self): return f"{self.__class__.__name__} [global_step={self.global_step} min_lr={self.min_lr} warmup_steps={self.warmup_steps}\n\tpg2step={self.pg2step} pg2start_step={self.pg2start_step}\n\tlr_inc_per_step={self.lr_inc_per_step}\n\tlrs={self.get_lr()}]"
+
+
 class CosineAnnealingWarmupRestarts(_LRScheduler):
     """
         optimizer (Optimizer): Wrapped optimizer.

@@ -452,6 +452,7 @@ def get_args(args=None):
     if args.ex_per_epoch // args.mini_bs > args.ipe:
         raise ValueError(f"Request at least --ex_per_epoch // --mini_bs iterations for --ipe")
 
+    args.val_n_way = min(args.val_n_way, args.train_n_way)
     return args
 
 
@@ -560,9 +561,11 @@ if __name__ == "__main__":
     # Get the scheduler
     ############################################################################    
     if args.scheduler == "linear_ramp_cosine_decay":
-        scheduler = CosineAnnealingWarmupRestartsMultipleParamGroups(optimizer,
-            first_cycle_steps=args.epochs * args.ipe,
+        scheduler = LinearRampCosineDecayScheduler(optimizer,
+            total_steps=args.epochs * args.ipe,
             warmup_steps=args.n_ramp * args.ipe,
+            pg2base_lrs={"params_mae": args.lr, "params_z": args.lr_z},
+            pg2start_step={"params_mae": args.headstart_z * args.ipe, "params_z": 0},
             min_lr=args.min_lr,
             last_epoch=last_step)
     elif args.scheduler == "linear_ramp":

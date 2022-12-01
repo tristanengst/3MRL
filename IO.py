@@ -56,7 +56,7 @@ def add_linear_probe_args(P):
         help="Linear probe test/data gathering batch size")
     P.add_argument("--val_n_way", type=int, default=32,
         help="Number of classes in probe/finetune data")
-    P.add_argument("--val_n_shot", type=int, default=100,
+    P.add_argument("--val_n_shot", type=int, default=50,
         help="Number of examples per class in probe/finetune data")
     P.add_argument("--probe_lr", type=float, default=1e-3,
         help="Linear probe base learning rate")
