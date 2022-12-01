@@ -19,6 +19,43 @@ from Utils import *
 from Blocks import AdaIN, LocalAdaIN
 from Augmentation import de_normalize
 
+class Affine(nn.Module):
+    """Applies a learned affine transformation over the last axis of the
+    input.
+
+    Args:
+    dim     -- dimensionality of the last axis of the input
+    weight  -- 
+    bias    --
+    """
+    def __init__(self, dim=None, weight=None, bias=None):
+        super(Affine, self).__init__()
+        self.weight = nn.Parameter(torch.randn(dim)) if weight is None else nn.Parameter(weight.squeeze().detach())
+        self.bias = nn.Parameter(torch.randn(dim)) if bias is None else nn.Parameter(bias.squeeze().detach())
+        self.dim = self.bias.shape[0]
+
+    def __str__(self): return f"{self.__class__.__name__} [dim={self.dim}]"
+
+    def forward(self, x):
+        return x * self.weight + self.bias
+
+    @staticmethod
+    def from_layernorm(l):
+        """Returns an Affine layer with the parameters of LayerNorm [l]."""
+        return Affine(weight=l.weight.detach(), bias=l.bias.detach())
+
+    @staticmethod
+    def make_block_start_with_affine(b):
+        """Returns transformer block [b] with its first LayerNorm an equivalent
+        Affine layer.
+        """
+        if isinstance(b, IPBlock):
+            b.block.norm1 = Affine.from_layernorm(b.block.norm1)
+        else:
+            b.norm1 = Affine.from_layernorm(b.norm1)
+        return b
+
+
 class MaskedAutoencoderViT(nn.Module):
     """Masked Autoencoder with VisionTransformer backbone."""
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=1024,
@@ -71,9 +108,9 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(decoder_depth)])
+
         self.decoder_norm = norm_layer(decoder_embed_dim)
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
-
         self.norm_pix_loss = norm_pix_loss
         self.initialize_weights()
 
@@ -325,6 +362,7 @@ def extend_idx2v_method(idx2v_method, length):
     """
     return {k: False for k in range(length)} | idx2v_method
 
+
 class IPBlock(nn.Module):
     """Wraps a vision transformer block and adds noise to its output.
     Args:
@@ -408,15 +446,32 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
         super(IPViT, self).__init__(**kwargs)
 
         self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
+        
+        ########################################################################
+        # Make the LayerNorms starting a block an Affine layer if the block is
+        # preceeded by a LocalAdaIN
+        idx2block = []
+        for idx,b in enumerate(self.blocks):
+            prev_block_idx = idx - 1
+            if (prev_block_idx in self.idx2v_method
+                and isinstance(self.idx2v_method[prev_block_idx], LocalAdaIN)):
+                idx2block.append(Affine.make_block_start_with_affine(b))
+            else:
+                idx2block.append(b)
+
+        # Make some blocks implicit probabilistic
         idx2block = [IPBlock(b, vm) if vm else b
-            for b,vm in zip(self.blocks, self.idx2v_method.values())]
+            for b,vm in zip(idx2block, self.idx2v_method.values())]
         self.idx2block = {str(idx): b for idx,b in enumerate(idx2block)}
         self.idx2block = nn.ModuleDict(self.idx2block)
         del self.blocks
 
+        # Get the mapping for latent codes being put into blocks
         self.block_idx2z_idx = {b_idx: z_idx
             for z_idx,b_idx in enumerate([
                 b_idx for b_idx,vm in self.idx2v_method.items() if vm])}
+
+        ########################################################################
 
         self.global_pool = global_pool
         if self.global_pool:
@@ -572,21 +627,37 @@ class MaskedIPViT(MaskedAutoencoderViT):
             super(MaskedIPViT, self).__init__(**mae_model.kwargs)
             self.load_state_dict(mae_model.state_dict(), strict=False)
 
-        # Replace the normal ModuleList [blocks] with a dictionary mapping from
-        # block indices to the blocks, with some of the blocks made IP
-        # (ie. accept a representation and noise as input, and fuse the two in
-        # the output). This is way of adding IPness can be adapted to
-        # many different architectures.
         self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
+        ########################################################################
+        # Make the LayerNorms starting a block an Affine layer if the block is
+        # preceeded by a LocalAdaIN
+        idx2block = []
+        for idx,b in enumerate(self.blocks):
+            prev_block_idx = idx - 1
+            if (prev_block_idx in self.idx2v_method
+                and isinstance(self.idx2v_method[prev_block_idx], LocalAdaIN)):
+                idx2block.append(Affine.make_block_start_with_affine(b))
+            else:
+                idx2block.append(b)
+
+        # Make some blocks implicit probabilistic
         idx2block = [IPBlock(b, vm) if vm else b
-            for b,vm in zip(self.blocks, self.idx2v_method.values())]
+            for b,vm in zip(idx2block, self.idx2v_method.values())]
         self.idx2block = {str(idx): b for idx,b in enumerate(idx2block)}
         self.idx2block = nn.ModuleDict(self.idx2block)
         del self.blocks
 
+        # Get the mapping for latent codes being put into blocks
         self.block_idx2z_idx = {b_idx: z_idx
             for z_idx,b_idx in enumerate([
                 b_idx for b_idx,vm in self.idx2v_method.items() if vm])}
+
+        # If the last encoder block ends with a LocalAdaIN, the decoder norm and
+        # the first norm of the first decoder block need to become Affine layers
+        if isinstance(self.idx2v_method[len(idx2block) - 1], LocalAdaIN):
+            self.norm = Affine.from_layernorm(self.norm)
+            self.decoder_blocks[0] = Affine.make_block_start_with_affine(self.decoder_blocks[0])
+        ########################################################################
 
         tqdm.write(f"{self.__class__.__name__} [num_blocks {len(self.idx2block)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}]")
 
@@ -660,7 +731,6 @@ class MaskedIPViT(MaskedAutoencoderViT):
             else:
                 x = block(x)
 
-        x_before_norm = x
         x = self.norm(x)
         return x, mask, ids_restore
 

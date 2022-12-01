@@ -4,7 +4,7 @@
 
 #SBATCH --array=START_CHUNK-END_CHUNK%PARALLEL
 #SBATCH --time=TIME               # Time: D-H:M:S
-#SBATCH --account=rrg-keli              # Account: def-keli/rrg-keli
+#SBATCH --account=ACCOUNT              # Account: def-keli/rrg-keli
 #SBATCH --mem=120G                       # Memory in total
 #SBATCH --nodes=1                       # Number of nodes requested.
 #SBATCH --cpus-per-task=12              # Number of cores per task.

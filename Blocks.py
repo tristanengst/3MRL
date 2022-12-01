@@ -175,7 +175,6 @@ class LocalAdaIN(nn.Module):
         x   -- image features
         z   -- latent codes
         """
-        assert 0
         if x.shape[1] == self.c:
             z = self.model(z)
             z_mean = z[:, :self.c]

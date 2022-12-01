@@ -512,9 +512,10 @@ if __name__ == "__main__":
     Misc.pretty_print_args(args)
     tqdm.write(f"LOG: Will save to {model_folder(args)}")
     
-    # tqdm.write(f"MODEL\n{dict(model.named_parameters()).keys()}")
+    tqdm.write(f"MODEL\n{model}")
     tqdm.write(f"OPTIMIZER\n{optimizer}")
     tqdm.write(f"LATENT_SPEC\n{latent_spec}")
+
 
     ############################################################################
     # Get the data and KKM. If resuming from an MAE checkpoint, we need to train
