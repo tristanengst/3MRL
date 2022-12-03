@@ -19,7 +19,7 @@ import Misc
 
 # I don't think this does anything because we don't have convolutions, but it
 # probably can't hurt
-torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.benchmark = True
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 plt.rcParams["savefig.bbox"] = "tight"
@@ -334,7 +334,7 @@ class LinearRampCosineDecayScheduler(_LRScheduler):
 
         self.global_step += 1
 
-    def __str__(self): return f"{self.__class__.__name__} [global_step={self.global_step} min_lr={self.min_lr} warmup_steps={self.warmup_steps}\n\tpg2step={self.pg2step} pg2start_step={self.pg2start_step}\n\tlr_inc_per_step={self.lr_inc_per_step}\n\tlrs={self.get_lr()}]"
+    def __str__(self): return f"{self.__class__.__name__} [global_step={self.global_step} min_lr={self.min_lr} warmup_steps={self.warmup_steps}\n\tpg2step={self.pg2step} pg2start_step={self.pg2start_step}\n\tlr_inc_per_step={self.lr_inc_per_step}\n\tbase_lrs{self.pg2base_lrs} lrs={self.get_lr()}]"
 
 
 class CosineAnnealingWarmupRestarts(_LRScheduler):

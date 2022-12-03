@@ -14,7 +14,7 @@ def get_train_transforms(args):
     """Returns transforms for pretraining."""
     if args.use_augs:
         return transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size,
+           transforms.RandomResizedCrop(args.input_size,
                 scale=(0.2, 1.0), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),

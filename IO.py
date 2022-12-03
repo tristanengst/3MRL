@@ -66,6 +66,8 @@ def add_linear_probe_args(P):
         help="Whether to ignore the code in all linear probing")
     P.add_argument("--probe_eval_iter", type=int, default=-1,
         help="Evaluate every PROBE_EVAL_ITER epochs during training the probe")
+    P.add_argument("--probe_augs_per_image", type=int, default=1,
+        help="Number of augmentations per image in FeatureDataset. Training time scales linearly with this.")
     return P
 
 def add_eval_imle_args(P):
@@ -81,6 +83,8 @@ def add_eval_imle_args(P):
         help="Number of latents per example for logging images")
     P.add_argument("--fast_linear_probe", default=1, choices=[0, 1], type=int,
         help="Whether to do fast linear probing each validation")
+    P.add_argument("--eval_bs", default=32, type=int,
+        help="Batch size for evaluation. The model is computing this times z_per_ex_loss samples each time.")
     
     # Logging arguments
     P.add_argument("--steps_per_eval", type=int, default=64,
@@ -98,7 +102,7 @@ def add_train_imle_args(P):
     # Key arguments
     P.add_argument("--v_spec", nargs="*", default=[],
         help="Specification for making the autoencoder variational")
-    P.add_argument("--arch", choices=["vit_base", "vit_large"], 
+    P.add_argument("--arch", choices=["vit_base", "vit_large", "vit_base_vis"], 
         default="vit_base",
         help="Type of ViT model to use")
     P.add_argument("--resume", default=None,

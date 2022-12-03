@@ -1,6 +1,7 @@
 import argparse
 from copy import deepcopy
 from itertools import chain
+import time
 from tqdm import tqdm
 import wandb
 
@@ -125,6 +126,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
     args        -- Namespace with --sp, --ns, and --code_bs arguments
     epoch       -- the index of the current epoch. Used only for logging
     """
+    start_time = time.time()
     with torch.no_grad():
         least_losses = torch.ones(len(dataset), device=device) * float("inf")
         initial_codes = sample_latent_dict(latent_spec,
@@ -136,8 +138,9 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
         mask_noise = initial_codes["mask_noise"]
         latents_only_spec = {"latents": latent_spec["latents"]}
 
-        # For logging
-        first_losses = []
+        # Tensor where the ith index gives the average loss of the first --sp\
+        # codes for that image. We use this for logging.
+        first_losses = torch.ones(args.ex_per_epoch) * float("inf")
 
         loader = DataLoader(dataset,
             batch_size=args.code_bs,
@@ -170,32 +173,34 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                 with torch.cuda.amp.autocast():
                     losses = model(x, z,
                         mask_ratio=args.mask_ratio,
-                        reduction="batch")
-                _, idxs = torch.min(losses.view(bs, args.sp), dim=1)
+                        reduction="batch").view(bs, args.sp)
+                    least_losses_batch, idxs = torch.min(losses, dim=1)
 
-                new_codes = z["latents"]
-                new_codes = new_codes.view((bs, args.sp) + new_codes.shape[1:])
-                new_codes = new_codes[torch.arange(bs), idxs]
-                losses = losses.view(bs, args.sp)[torch.arange(bs), idxs]
+                    new_codes = z["latents"]
+                    new_codes = new_codes.view((bs, args.sp) + new_codes.shape[1:])
+                    new_codes = new_codes[torch.arange(bs), idxs]
 
-                change_idxs = losses < least_losses[start:stop]
-                best_latents[start:stop][change_idxs] = new_codes[change_idxs].cpu()
-                least_losses[start:stop][change_idxs] = losses[change_idxs]
-                
-                # We log the mean and not the min because if args.sp is high
-                # enough, it will be hard to meaningfully improve on what we get
-                # the first time we sample, but we still want to see that the
-                # codes we use are better than average.
-                if inner_idx == 0 and args.log_sampling:
-                    first_losses.append(losses.mean().item())
+                    change_idxs = least_losses_batch < least_losses[start:stop]
+                    best_latents[start:stop][change_idxs] = new_codes[change_idxs].cpu()
+                    least_losses[start:stop][change_idxs] = least_losses_batch[change_idxs]
+                    
+                    # We log the mean and not the min because if args.sp is high
+                    # enough, it will be hard to meaningfully improve on what we get
+                    # the first time we sample, but we still want to see that the
+                    # codes we use are better than average.
+                    if inner_idx == 0:
+                        first_losses[start:stop] = torch.mean(losses, dim=1).cpu()
 
-    if args.log_sampling:
-        wandb.log({"sampling/first_losses": np.mean(first_losses),
-            "sampling/end_losses": least_losses.mean().item(),
-            "pretrain/step": epoch * args.ipe,
-            "epoch": epoch})
+    wandb.log({"sampling/first_losses": torch.mean(first_losses).item(),
+        "sampling/end_losses": torch.mean(least_losses).item(),
+        "pretrain/step": epoch * args.ipe,
+        "epoch": epoch})
 
-    tqdm.write(f"SAMPLING: average first loss {np.mean(first_losses):.5f} | average end loss {least_losses.mean().item():.5f} ")
+    end_time = time.time()
+    images_codes_per_sec = args.ex_per_epoch * args.ns / (end_time - start_time)
+    sampling_loss_delta = torch.mean(least_losses.cpu() - first_losses)
+
+    tqdm.write(f"SAMPLING: mean first loss {torch.mean(first_losses).item():.5f} | mean end loss {least_losses.mean().item():.5f} | mean delta {sampling_loss_delta} | images codes per sec {images_codes_per_sec:.5f} ")
 
     return ImageLatentDataset(torch.cat(all_images, axis=0).cpu(),
         mask_noises=mask_noise.cpu(),
@@ -228,21 +233,23 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
         z_per_ex        -- number of codes to try for each image
         val_ignore_z    -- whether to ignore latent codes
         """
+        # args.eval_bs * args.z_per_ex_loss is the maximum amount we can put on
+        # GPUs. If [z_per_ex] is actually smaller, we can increase the batch
+        # size and run faster.
         loader = DataLoader(dataset,
-            batch_size=args.code_bs * max(1, args.sp // z_per_ex),
+            batch_size=args.eval_bs * max(1, args.z_per_ex_loss // z_per_ex),
             num_workers=args.num_workers,
             pin_memory=True)
 
-        images, preds, masks, total_loss = [], [], [], 0
+        images, targets, preds, inputs, total_loss = [], [], [], [], 0
         with torch.no_grad():
             for x,_ in tqdm(loader,
                 desc="Validation: computing reconstruction loss and image grid",
                 leave=False,
                 dynamic_ncols=True):
 
-                bs_spec = {"mask_noise_bs": len(x),
-                    "latents_bs": len(x) * z_per_ex}
-                z = sample_latent_dict(latent_spec | bs_spec, args=args)
+                spec = {"mask_noise_bs": len(x), "latents_bs": len(x) * z_per_ex}
+                z = sample_latent_dict(latent_spec | spec, args=args)
                 with torch.cuda.amp.autocast():
                     loss, pred, mask = model(x, z,
                         mask_ratio=args.mask_ratio,
@@ -252,17 +259,31 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
                 total_loss += (loss.mean() * len(x)).detach()
 
                 if return_images:
-                    images.append(de_normalize(x).cpu())
+                    pred[(~mask.bool()).repeat_interleave(len(pred) // len(mask), dim=0)] = 1
+                    if args.norm_pix_loss:
+                        mean = x.mean(dim=-1, keepdim=True)
+                        var = x.var(dim=-1, keepdim=True)
+                        t = (x - mean) / (var + 1.e-6) ** .5
+                    else:
+                        t = x
+                    
+                    # What's here is de-normalized so it makes sense as an image.
+                    # If the model predicts normalized images, many pixel values
+                    # are negative! This also makes the task seem harder.
+                    x = de_normalize(x)
+                    inputs.append(torch.where(~mask.bool().cpu(), x, 1))
+                    targets.append(torch.where(mask.bool().cpu(), de_normalize(t), 1))
+                    images.append(x)
                     preds.append(pred.cpu())
-                    masks.append(mask.cpu())
 
         if return_images:
             images = torch.cat(images, dim=0)
-            masks = torch.cat(masks, dim=0)
+            inputs = torch.cat(inputs, dim=0)
+            targets = torch.cat(targets, dim=0)
             preds = torch.cat(preds, dim=0)
             preds = preds.view(len(dataset), z_per_ex, *preds.shape[1:])
-            image_grid = [[img] + [p for p in pred]
-                for img,pred in zip(images, preds)]
+            image_grid = [[img] + [inp] + [t] + [p for p in pred]
+                for img,inp,t,pred in zip(images, inputs, targets, preds)]
             
             return total_loss.item() / (len(dataset)), image_grid
         else:
@@ -322,6 +343,9 @@ def get_masked_ipvit_model(args):
     if args.arch == "vit_base":
         mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_base_full.pth")["model"]
         mae = mae_vit_base_patch16(norm_pix_loss=args.norm_pix_loss)
+    elif args.arch == "vit_base_vis":
+        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_visualize_vit_base.pth")["model"]
+        mae = mae_vit_base_patch16(norm_pix_loss=False)
     elif args.arch == "vit_large":
         mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_large_full.pth")["model"]
         mae = mae_vit_large_patch16(norm_pix_loss=args.norm_pix_loss)
@@ -471,6 +495,7 @@ if __name__ == "__main__":
             mode=args.wandb, project="3MRL",
             name=os.path.basename(model_folder(args)))
         kkm = None
+        baseline = {}
         last_epoch = -1
         last_step = -1
     else:
@@ -511,9 +536,9 @@ if __name__ == "__main__":
     Misc.pretty_print_args(args)
     tqdm.write(f"LOG: Will save to {model_folder(args)}")
     
-    tqdm.write(f"MODEL\n{model}")
-    tqdm.write(f"OPTIMIZER\n{optimizer}")
-    tqdm.write(f"LATENT_SPEC\n{latent_spec}")
+    # tqdm.write(f"MODEL\n{model}")
+    # tqdm.write(f"OPTIMIZER\n{optimizer}")
+    # tqdm.write(f"LATENT_SPEC\n{latent_spec}")
 
 
     ############################################################################
@@ -592,7 +617,11 @@ if __name__ == "__main__":
             args=args,
             ignore_z=True)
         baseline = {f"{k}_baseline": v for k,v in baseline.items()}
-    print_and_log_results(baseline, args, epoch=last_epoch + 1, baseline=True)
+
+    if not baseline == {}:
+        print_and_log_results(baseline, args,
+            epoch=last_epoch + 1,
+            baseline=True)
 
     ############################################################################
     # Begin training
@@ -609,7 +638,7 @@ if __name__ == "__main__":
         # Do an initial validation of to see where what we need to improve from.
         # This should be equivalent to the last validation done in prior
         # training if we're resuming.
-        if epoch == last_epoch + 1:
+        if epoch == last_epoch + 1 and args.steps_per_eval > 0:
             data_to_log = validate(model=model,
                 data_tr=data_tr,
                 data_val=data_val,

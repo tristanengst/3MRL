@@ -1,4 +1,5 @@
 import argparse
+from itertools import chain
 import random
 from tqdm import tqdm as tqdm
 
@@ -40,14 +41,15 @@ class FeatureDataset(Dataset):
     bs              -- batch size to get features in
     ignore_z        -- whether to ignore codes when building the dataset
     """
-    def __init__(self, source, model, num_workers=24, bs=128, ignore_z=False):
+    def __init__(self, source, model, num_workers=24, bs=1024, ignore_z=False, augs_per_image=1):
         super(FeatureDataset, self).__init__()
 
         self.source = source
-        loader = DataLoader(source,
+        base_loader = DataLoader(source,
             pin_memory=True,
             num_workers=num_workers,
             batch_size=bs)
+        loader = chain(*[base_loader] * augs_per_image)
         
         self.feats = []
         self.labels = []
@@ -55,6 +57,7 @@ class FeatureDataset(Dataset):
             for x,y in tqdm(loader,
                 desc=f"BUILDING FEATURE DATASET | ignore_z [{bool(ignore_z)}]",
                 leave=False,
+                total=len(base_loader) * augs_per_image,
                 dynamic_ncols=True):
 
                 x.to(device, non_blocking=True)
@@ -121,12 +124,14 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None, verbose=True
         model=backbone,
         num_workers=args.num_workers,
         bs=args.probe_bs_val,
-        ignore_z=args.probe_ignore_z)
+        ignore_z=args.probe_ignore_z,
+        augs_per_image=args.probe_augs_per_image)
     data_val = FeatureDataset(data_val,
         model=backbone,
         num_workers=args.num_workers,
         bs=args.probe_bs_val,
-        ignore_z=args.probe_ignore_z)
+        ignore_z=args.probe_ignore_z,
+        augs_per_image=args.probe_augs_per_image)
     loader_tr = DataLoader(data_tr,
         shuffle=True,
         batch_size=args.probe_bs,

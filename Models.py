@@ -190,7 +190,7 @@ class MaskedAutoencoderViT(nn.Module):
             mask_noise = torch.rand(N, L, device=x.device)
         else:
             mask_noise = mask_noise
-
+            
         ids_shuffle = torch.argsort(mask_noise, dim=1)
         ids_restore = torch.argsort(ids_shuffle, dim=1)
         ids_keep = ids_shuffle[:, :len_keep]
@@ -239,6 +239,7 @@ class MaskedAutoencoderViT(nn.Module):
         # apply Transformer blocks
         for blk in self.decoder_blocks:
             x = blk(x)
+
         x = self.decoder_norm(x)
 
         # predictor projection
