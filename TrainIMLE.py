@@ -190,9 +190,31 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                     # codes we use are better than average.
                     if inner_idx == 0:
                         first_losses[start:stop] = torch.mean(losses, dim=1).cpu()
+        
+        # Compute what happens when we don't have any latent codes. We want this
+        # to be worse than when we do have latent codes.
+        ignore_z_losses = torch.ones(args.ex_per_epoch)
+        for outer_idx,(x,_) in tqdm(enumerate(loader),
+            desc="SAMPLING: Chunks of batch",
+            total=len(loader),
+            leave=False,
+            dynamic_ncols=True):
+            start = outer_idx * args.code_bs
+            stop = min(len(dataset), (outer_idx + 1) * args.code_bs)
+            
+            latents = sample_latent_dict(latents_only_spec, bs=bs, args=args)
+            z = {"mask_noise": mask_noise[start:stop]} | latents
+            
+            with torch.cuda.amp.autocast():
+                ignore_z_losses[start:stop] = model(x, z,
+                    ignore_z=True,
+                    mask_ratio=args.mask_ratio,
+                    reduction="batch").view(bs)
 
+    delta_wrt_no_z = torch.mean(least_losses.cpu() - ignore_z_losses).item()
     wandb.log({"sampling/first_losses": torch.mean(first_losses).item(),
         "sampling/end_losses": torch.mean(least_losses).item(),
+        "sampling/delta_wrt_no_z": delta_wrt_no_z,
         "pretrain/step": epoch * args.ipe,
         "epoch": epoch})
 
@@ -200,7 +222,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
     images_codes_per_sec = args.ex_per_epoch * args.ns / (end_time - start_time)
     sampling_loss_delta = torch.mean(least_losses.cpu() - first_losses)
 
-    tqdm.write(f"SAMPLING: mean first loss {torch.mean(first_losses).item():.5f} | mean end loss {least_losses.mean().item():.5f} | mean delta {sampling_loss_delta} | images codes per sec {images_codes_per_sec:.5f} ")
+    tqdm.write(f"SAMPLING: mean first loss {torch.mean(first_losses).item():.5f} | mean end loss {least_losses.mean().item():.5f} | mean delta {sampling_loss_delta:.5f} | delta wrt no_z {delta_wrt_no_z:.5f} | images codes per sec {images_codes_per_sec:.5f} ")
 
     return ImageLatentDataset(torch.cat(all_images, axis=0).cpu(),
         mask_noises=mask_noise.cpu(),

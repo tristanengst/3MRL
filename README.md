@@ -11,24 +11,12 @@
     pip install git+https://github.com/rwightman/pytorch-image-models
     pip install git+https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup
     ```
-2. See **Setting up Imagenet** below for how to download Imagenet.
-3. Download the ViT-Base checkpoint used in the original paper:
-    ```
-    python DownloadOriginalMAE.py --model vit_base
-    ```
+2. Download the pretrained MAE weights from [here](https://github.com/facebookresearch/mae/issues/8).
 
 ### Running Code
-Finetune a ViT model using IMLE and training it as a VAE. This will save checkpoints including model weights and generate outputs to the `vaes` folder. You can also set `--resume` to `"none"` to train from scratch.
+Finetune a ViT model using IMLE and training it as a implicit probabilistic model. Please see `IO.py` for the arguments this takes.
 ```
-python TrainIMLE.py --resume vit_base
-```
-Run a linear evaluation using the encoder of a saved checkpoint as a frozen feature extractor:
-```
-python -m --nproc_per_node NUM_GPUS LinearProbe.py --data_tr DATA_TR --data_val DATA_VAL --finetune PATH/TO/MODEL.pt
-```
-Finetune the encoder of a saved checkpoint on a classification task:
-```
-
+python TrainIMLE.py --data_tr PATH_TO_TRAINING_DATA --data_val PATH_TO_VAL_DATA
 ```
 
 ### Downloadable Checkpoints
