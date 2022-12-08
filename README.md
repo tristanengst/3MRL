@@ -1,4 +1,4 @@
-# URSA: Unsupervised Latent Space Augmentation
+# IMLE-SSL: Implicit Maximum Likelihood for Self-Supervised Learning
 
 ### Setup
 1. Install the following packages via the following commands.
