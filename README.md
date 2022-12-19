@@ -21,11 +21,11 @@ python TrainIMLE.py --data_tr PATH_TO_TRAINING_DATA --data_val PATH_TO_VAL_DATA
 
 For the runs referenced in the graph, the IMLE-MAE run can be recreated with
 ```
-TrainIMLE.py --gpus 0 1 --suffix IMLE_FROM_SCRATCH --data_tr IMAGENET_TRAIN --data_val IMAGENET_VAL --fast_linear_probe 1 --ex_for_mse_loss 2048 --v_spec 11 adain --ex_per_epoch 2048 --code_bs 32 --sp 64 --ns 128 --mini_bs 64 --ipe 32 --lr_z 1e-4 --lr 1e-4 --use_augs 1 --shuffle_data 1 --scheduler linear_ramp_cosine_decay --n_ramp 8 --epochs 512 --save_iter 32 --train_n_way 32 --train_n_shot 64 --steps_per_eval 256 --wandb offline --finetune 0 --ignore_z 0 --no-fp16 --num_workers 8
+TrainIMLE.py --gpus 0 1 --suffix IMLE_FROM_SCRATCH --data_tr IMAGENET_TRAIN --data_val IMAGENET_VAL --fast_linear_probe 1 --ex_for_mse_loss 2048 --ip_spec 11 adain --ex_per_epoch 2048 --code_bs 32 --sp 64 --ns 128 --mini_bs 64 --ipe 32 --lr_z 1e-4 --lr 1e-4 --use_augs 1 --shuffle_data 1 --scheduler linear_ramp_cosine_decay --n_ramp 8 --epochs 512 --save_iter 32 --train_n_way 32 --train_n_shot 64 --steps_per_eval 256 --wandb offline --finetune 0 --ignore_z 0 --no-fp16 --num_workers 8
 ```
 and the MAE run with
 ```
-TrainIMLE.py --gpus 0 1 --suffix MAE_FROM_SCRATCH --data_tr IMAGENET_TRAIN --data_val IMAGENET_VAL --fast_linear_probe 1 --ex_for_mse_loss 2048 --v_spec 11 adain --ex_per_epoch 2048 --code_bs 32 --sp 64 --ns 128 --mini_bs 64 --ipe 32 --lr_z 1e-4 --lr 1e-4 --use_augs 1 --shuffle_data 1 --scheduler linear_ramp_cosine_decay --n_ramp 8 --epochs 512 --save_iter 32 --train_n_way 32 --train_n_shot 64 --steps_per_eval 256 --wandb offline --finetune 0 --ignore_z 1 --no-fp16 --num_workers 8
+TrainIMLE.py --gpus 0 1 --suffix MAE_FROM_SCRATCH --data_tr IMAGENET_TRAIN --data_val IMAGENET_VAL --fast_linear_probe 1 --ex_for_mse_loss 2048 --ip_spec 11 adain --ex_per_epoch 2048 --code_bs 32 --sp 64 --ns 128 --mini_bs 64 --ipe 32 --lr_z 1e-4 --lr 1e-4 --use_augs 1 --shuffle_data 1 --scheduler linear_ramp_cosine_decay --n_ramp 8 --epochs 512 --save_iter 32 --train_n_way 32 --train_n_shot 64 --steps_per_eval 256 --wandb offline --finetune 0 --ignore_z 1 --no-fp16 --num_workers 8
 ```
 
 

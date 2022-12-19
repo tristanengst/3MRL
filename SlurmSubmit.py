@@ -4,33 +4,32 @@ import random
 from tqdm import tqdm
 from Utils import *
 
-def get_file_move_command(unparsed_args):
-    """Returns a (file_move_command, unparsed_args) tuple, where
-    [file_move_command] can be run to move files onto the compute node, and
-    [unparsed_args] is the input [unparsed_args] but modified to use the data on
-    the compute node.
+def unparse_args(args):
+    """Returns [args] as a string that can be parsed again."""
+    s = ""
+    for k,v in vars(args).items():
+        if isinstance(v, (list, tuple)):
+            s += f" --{k} {' '.join([str(v_) for v_ in v])}"
+        else:
+            s += f" --{k} {v}"
+    return s
 
-    Supposing [unparsed_args] were parsed, the command will move the file
-    specified by the value of each key that begins with 'data_' onto the compute
-    node. The returned [unparsed_args] specify the path on the compute node
-    instead.
 
-    On ComputeCanada, this gives about 2x the performance.
+def get_args_with_data_on_node(args, arg_names_to_move, out_dir="$SLURM_TMPDIR"):
+    """Returns an (args, cmd) tuple where [args] is [args] modified to have the
+    value in [args] of each element of [arg_names_to_move] listed inside
+    [out_dir], and [cmd] is a string giving commands to move the files there.
     """
-    arg2idx = {a: idx for idx,a in enumerate(unparsed_args)}
-    data_args = {a for a in unparsed_args if a.startswith("--data_")}
+    s = ""
+    args = vars(args)
+    for a in arg_names_to_move:
+        if a in args and isinstance(args[a], str) and os.path.exists(args[a]):
+            s += f"rsync -rav --relative {args[a]} {out_dir}/"
+            args[a] = f"{out_dir}/{args[a]}".replace("//", "/").strip("/")
+        else:
+            continue
 
-    source2dest = {}
-    for d in data_args:
-        source = unparsed_args[arg2idx[d] + 1]
-        dest = source.replace(os.path.dirname(os.path.dirname(source)), "")
-        dest = dest.lstrip("/")
-        source2dest[source] = f"$SLURM_TMPDIR/{dest}"
-        unparsed_args[arg2idx[d] + 1] = f"$SLURM_TMPDIR/{dest}"
-
-    s = "\n".join([f"mkdir {os.path.dirname(d)}\ncp {s} {d}"
-        for s,d in source2dest.items()])
-    return s, unparsed_args
+    return argparse.Namespace(**args), f"{s}\n"
 
 def get_time(hours):
     """Returns [hours] in SLURM string form.
@@ -89,8 +88,6 @@ if __name__ == "__main__":
     else:
         launch_command = "python"
 
-    file_move_command = None
-
     ############################################################################
     # Get script-specific argument settings
     ############################################################################
@@ -116,40 +113,14 @@ if __name__ == "__main__":
             template = f.read()
     elif submission_args.script == "TrainIMLE.py":
         from TrainIMLE import get_args, model_folder
-
-        file_move_command, unparsed_args = get_file_move_command(unparsed_args)
         args = get_args(unparsed_args)
+        args, file_move_command = get_args_with_data_on_node(args, ["data_tr", "data_val"])
 
-        unparsed_args += [f"--job_id", "$SLURM_ARRAY_JOB_ID"]
-
-        START_CHUNK = "0"
-        END_CHUNK = "0"
-        PARALLEL = "1"
         NUM_GPUS = str(len(args.gpus))
         NAME = model_folder(args, make_folder=False)
         NAME = NAME.replace(f"{args.save_folder}/models/", "").replace("/", "_")
         
-        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {' '.join(unparsed_args)}"
-        
-        template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
-        with open(template, "r") as f:
-            template = f.read()
-    elif submission_args.script == "TrainIMLE32.py":
-        from TrainIMLE32 import get_args, model_folder
-
-        file_move_command, unparsed_args = get_file_move_command(unparsed_args)
-        args = get_args(unparsed_args)
-
-        unparsed_args += [f"--job_id", "$SLURM_ARRAY_JOB_ID"]
-
-        START_CHUNK = "0"
-        END_CHUNK = "0"
-        PARALLEL = "1"
-        NUM_GPUS = str(len(args.gpus))
-        NAME = model_folder(args, make_folder=False)
-        NAME = NAME.replace(f"{project_dir}/models/", "").replace("/", "_")
-        
-        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {' '.join(unparsed_args)}"
+        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {unparse_args(args)} --num_workers 12 --save_folder ~/scratch/3MRL"
         
         template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
         with open(template, "r") as f:
@@ -158,12 +129,9 @@ if __name__ == "__main__":
         raise ValueError(f"Unknown script '{submission_args.script}")
 
     template = template.replace("SCRIPT", SCRIPT)
-    template = template.replace("START_CHUNK", START_CHUNK)
-    template = template.replace("END_CHUNK", END_CHUNK)
     template = template.replace("TIME", get_time(submission_args.time))
     template = template.replace("NAME", NAME)
     template = template.replace("NUM_GPUS", NUM_GPUS)
-    template = template.replace("PARALLEL", PARALLEL)
     template = template.replace("ACCOUNT", submission_args.account)
     template = template.replace("GPU_TYPE", GPU_TYPE)
     slurm_script = f"slurm/{NAME}.sh"

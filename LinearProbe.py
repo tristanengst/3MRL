@@ -175,7 +175,7 @@ def main(args):
     elif os.path.exists(args.finetune):
         checkpoint = torch.load(args.finetune, map_location="cpu")
         model = IPViT(encoder_kwargs=checkpoint["encoder_kwargs"],
-            idx2v_method=checkpoint["idx2v_method"],
+            idx2ip_method=checkpoint["idx2ip_method"],
             num_classes=data_str_to_num_classes(args.data_tr),
             global_pool=args.global_pool,
             noise=args.noise)

@@ -26,7 +26,7 @@ def save_state(model, optimizer, scheduler, kkm, epoch, args, baseline=dict()):
     """Saves input training utilities."""
     torch.save({"model": de_dataparallel(model).cpu().state_dict(),
         "encoder_kwargs": de_dataparallel(model).encoder_kwargs,
-        "idx2v_method": de_dataparallel(model).idx2v_method,
+        "idx2ip_method": de_dataparallel(model).idx2ip_method,
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler,
         "args": args,
@@ -45,8 +45,9 @@ def model_folder(args, make_folder=False):
     make_folder -- whether or not to create the folder corresponding to [args]
     """
     data = os.path.basename(os.path.dirname(args.data_tr.strip("/"))).strip("/")
-    v_spec = "_".join(args.v_spec)
-    folder = f"{args.save_folder}/models/{data}-{args.arch}-bs{args.ex_per_epoch}-epochs{args.epochs}-headstartz{args.headstart_z}-ipe{args.ipe}-lr{args.lr:.2e}-lrz{args.lr_z}-nramp{args.n_ramp}-ns{args.ns}-scheduler{args.scheduler}-vspec{v_spec}-{args.uid}{Misc.suffix_str(args)}"
+    ip_spec = "_".join(args.ip_spec)
+    job_id = "" if args.job_id is None else f"-{args.job_id}"
+    folder = f"{args.save_folder}/models/{args.script}-{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{args.ns}-scheduler{args.scheduler}-ipspec{ip_spec}-{args.uid}{job_id}{Misc.suffix_str(args)}"
 
     if make_folder:
         Misc.conditional_safe_make_directory(folder)
@@ -170,7 +171,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                     args=args)
                 z = {"mask_noise": mask_noise[start:stop]} | latents
                 
-                with torch.cuda.amp.autocast():
+                with torch.cuda.amp.autocast(enabled=args.fp16):
                     losses = model(x, z,
                         mask_ratio=args.mask_ratio,
                         reduction="batch").view(bs, args.sp)
@@ -205,7 +206,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
             latents = sample_latent_dict(latents_only_spec, bs=bs, args=args)
             z = {"mask_noise": mask_noise[start:stop]} | latents
             
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(enabled=args.fp16):
                 ignore_z_losses[start:stop] = model(x, z,
                     ignore_z=True,
                     mask_ratio=args.mask_ratio,
@@ -315,7 +316,7 @@ def validate(model, data_tr, data_val, latent_spec, args, ignore_z=False):
     # wish to ignore them once to get a baseline for what MAE would do.
     val_ignore_z = args.ignore_z | ignore_z
 
-    if args.fast_linear_probe:
+    if args.probe:
         probe_acc = fast_linear_probe(model, data_tr, data_val, args, verbose=False)
     else:
         probe_acc = -1
@@ -392,9 +393,9 @@ def get_model_optimizer(args, resume_optimizer=False):
     model = nn.DataParallel(model, device_ids=args.gpus).to(device)
 
     params_z = [v for p,v in model.named_parameters()
-            if "v_method" in p]
+            if "ip_method" in p]
     params_mae = [v for p,v in model.named_parameters()
-            if not "v_method" in p]
+            if not "ip_method" in p]
     optimizer = AdamW([{"params": params_z,
         "lr": args.lr_z,
         "initial_lr": 0,
@@ -479,14 +480,13 @@ def get_args(args=None):
     args = P.parse_args() if args is None else P.parse_args(args)
     args.save_folder = args.save_folder.strip("/")
 
-    if args.uid is None:
-        args.uid = wandb.util.generate_id()
+    args.uid = wandb.util.generate_id() if args.uid is None else args.uid
 
     if args.scheduler == "constant" and not args.n_ramp == 0:
         raise ValueError(f"Can not ramp constant scheduler. Set --n_ramp to zero")
 
-    if len(args.v_spec) == 0:
-        tqdm.write(f"WARNING: empty --v_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
+    if len(args.ip_spec) == 0:
+        tqdm.write(f"WARNING: empty --ip_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
         args.z_per_ex_vis = 1
         args.z_per_ex_loss = 1
     if args.sp > args.ns:
@@ -497,6 +497,11 @@ def get_args(args=None):
         raise ValueError(f"Request at least --ex_per_epoch // --mini_bs iterations for --ipe")
 
     args.val_n_way = min(args.val_n_way, args.train_n_way)
+
+    if args.lr_z == -1:
+        args.lr_z = args.lr
+
+    args.script = "MAE" if args.ignore_z else "MAE-IMLE"
     return args
 
 

@@ -23,7 +23,7 @@ def test_adain_outputs(model, latent_spec,  args):
 
     z_orig = z["latents"].detach().cpu().numpy()
 
-    # optimizer = torch.optim.SGD([z["latents"]] + list(model.idx2block["11"].v_method.parameters()), lr=.1)
+    # optimizer = torch.optim.SGD([z["latents"]] + list(model.idx2block["11"].ip_method.parameters()), lr=.1)
     optimizer = torch.optim.SGD(model.decoder_blocks[0].norm1.parameters(), lr=.1)
 
     images = []

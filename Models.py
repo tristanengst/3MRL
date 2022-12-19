@@ -325,12 +325,12 @@ class VisionTransformerBackbone(VisionTransformer):
         return super().forward_features(*args, **kwargs)
 
 def parse_ip_spec(args):
-    """Returns args.v_spec as a dictionary mapping transformer block indices to
+    """Returns args.ip_spec as a dictionary mapping transformer block indices to
     whether and how they should be IP. Blocks whose indices aren't in
     the mapping are assumed in model __init__ methods to be non-IP and
     such blocks need not be specified in the returned dictionary.
     """
-    def parse_v_spec_helper(s):
+    def parse_ip_spec_helper(s):
         if s in ["add", "zero"] or not s:
             return s
         elif s.startswith("adain"):
@@ -345,38 +345,38 @@ def parse_ip_spec(args):
         else:
             raise NotImplementedError()
 
-    key_args = [int(k) for idx,k in enumerate(args.v_spec) if idx % 2 == 0]
-    val_args = [v for idx,v in enumerate(args.v_spec) if idx % 2 == 1]
+    key_args = [int(k) for idx,k in enumerate(args.ip_spec) if idx % 2 == 0]
+    val_args = [v for idx,v in enumerate(args.ip_spec) if idx % 2 == 1]
     assert len(key_args) == len(val_args)
-    return {k: parse_v_spec_helper(v) for k,v in zip(key_args, val_args)}
+    return {k: parse_ip_spec_helper(v) for k,v in zip(key_args, val_args)}
 
 
-def extend_idx2v_method(idx2v_method, length):
-    """Returns [idx2v_method] extended to [length] by adding key-value pairs
+def extend_idx2ip_method(idx2ip_method, length):
+    """Returns [idx2ip_method] extended to [length] by adding key-value pairs
     where the value is False such that the returned dictionary has the first
     [length] whole numbers as keys.
 
     Args:
-    idx2v_method    -- mapping from the first N whole numbers to how/if blocks
+    idx2ip_method    -- mapping from the first N whole numbers to how/if blocks
                         with their index should be IP
     length          -- length to extend to
     """
-    return {k: False for k in range(length)} | idx2v_method
+    return {k: False for k in range(length)} | idx2ip_method
 
 
 class IPBlock(nn.Module):
     """Wraps a vision transformer block and adds noise to its output.
     Args:
     block       -- the vision transformer block to wrap
-    v_method    -- how to add noise (a) 'add' to have the noise added to the
+    ip_method    -- how to add noise (a) 'add' to have the noise added to the
                     block's output, or (b) an nn.Module taking the output and
                     the noise as input and producing a new output with the same
                     dimenion as the block's output
     """
-    def __init__(self, block, v_method="add"):
+    def __init__(self, block, ip_method="add"):
         super(IPBlock, self).__init__()
         self.block = block
-        self.v_method = v_method
+        self.ip_method = ip_method
 
     def get_latent_spec(self, test_input):
         """Returns the latent shape minus the batch dimension for the network.
@@ -385,10 +385,10 @@ class IPBlock(nn.Module):
         test_input  -- a BSxCxHxW tensor to be used as the test input
         """
         block_output = self.block(test_input)
-        if self.v_method == "add":
+        if self.ip_method == "add":
             return block_output.shape[1:]
-        elif isinstance(self.v_method, nn.Module):
-            return self.v_method.get_latent_spec(block_output)
+        elif isinstance(self.ip_method, nn.Module):
+            return self.ip_method.get_latent_spec(block_output)
         else:
             raise NotImplementedError()
 
@@ -406,11 +406,11 @@ class IPBlock(nn.Module):
             return torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
 
         z = z() if isinstance(z, nn.Module) else z
-        if self.v_method == "add":
+        if self.ip_method == "add":
             fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
             return fx + z
-        elif isinstance(self.v_method, nn.Module):
-            return self.v_method(fx, z)
+        elif isinstance(self.ip_method, nn.Module):
+            return self.ip_method(fx, z)
         else:
             raise NotImplementedError()
 
@@ -419,16 +419,16 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
     forward pass.
 
     To construct from a MaskedIPViT model [m]:
-    v = IPViT(idx2v_method=m.idx2v_method,
+    v = IPViT(idx2ip_method=m.idx2ip_method,
         encoder_kwargs=m.encoder_kwargs, ...)
     v.load_state_dict(m.state_dict())
 
     Args:
-    idx2v_method    -- mapping from from indices to the blocks to whether and
+    idx2ip_method    -- mapping from from indices to the blocks to whether and
                         how they should be IP. If the ith value in the
                         mapping is False, the ith block will not be made
                         IP. Otherwise, it will be replaced with a
-                        IPBlock using the value as [v_method].
+                        IPBlock using the value as [ip_method].
 
                         All missing key-value pairs will be added with the value
                         set to False.
@@ -438,7 +438,7 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
     num_classes     -- number of classes for classification
     kwargs          -- arguments for constructing the ViT architecture
     """
-    def __init__(self, idx2v_method={}, encoder_kwargs=None, global_pool=False,
+    def __init__(self, idx2ip_method={}, encoder_kwargs=None, global_pool=False,
         num_classes=1000, noise="gaussian", **kwargs):
 
         # The architecture [v_mae_model] overrides that in [kwargs] if possible
@@ -446,7 +446,7 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
         kwargs = kwargs if encoder_kwargs is None else kwargs | encoder_kwargs
         super(IPViT, self).__init__(**kwargs)
 
-        self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
+        self.idx2ip_method = extend_idx2ip_method(idx2ip_method, len(self.blocks))
         
         ########################################################################
         # Make the LayerNorms starting a block an Affine layer if the block is
@@ -454,15 +454,15 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
         idx2block = []
         for idx,b in enumerate(self.blocks):
             prev_block_idx = idx - 1
-            if (prev_block_idx in self.idx2v_method
-                and isinstance(self.idx2v_method[prev_block_idx], LocalAdaIN)):
+            if (prev_block_idx in self.idx2ip_method
+                and isinstance(self.idx2ip_method[prev_block_idx], LocalAdaIN)):
                 idx2block.append(Affine.make_block_start_with_affine(b))
             else:
                 idx2block.append(b)
 
         # Make some blocks implicit probabilistic
         idx2block = [IPBlock(b, vm) if vm else b
-            for b,vm in zip(idx2block, self.idx2v_method.values())]
+            for b,vm in zip(idx2block, self.idx2ip_method.values())]
         self.idx2block = {str(idx): b for idx,b in enumerate(idx2block)}
         self.idx2block = nn.ModuleDict(self.idx2block)
         del self.blocks
@@ -470,7 +470,7 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
         # Get the mapping for latent codes being put into blocks
         self.block_idx2z_idx = {b_idx: z_idx
             for z_idx,b_idx in enumerate([
-                b_idx for b_idx,vm in self.idx2v_method.items() if vm])}
+                b_idx for b_idx,vm in self.idx2ip_method.items() if vm])}
 
         ########################################################################
 
@@ -606,11 +606,11 @@ class MaskedIPViT(MaskedAutoencoderViT):
     """Masked VAE with VisionTransformer backbone.
 
     Args:
-    idx2v_method    --  mapping from from indices to the blocks to whether and
+    idx2ip_method    --  mapping from from indices to the blocks to whether and
                         how they should be IP. If the ith value in the
                         mapping is False, the ith block will not be made
                         IP. Otherwise, it will be replaced with a
-                        IPBlock using the value as [v_method].
+                        IPBlock using the value as [ip_method].
 
                         All missing key-value pairs will be added with the value
                         set to False.
@@ -621,29 +621,29 @@ class MaskedIPViT(MaskedAutoencoderViT):
     **kwargs        -- same kwargs as for a MaskedAutoencoderViT. Ignored if
                         [mae_model] is specified.
     """
-    def __init__(self, idx2v_method={}, mae_model=None, **kwargs):
+    def __init__(self, idx2ip_method={}, mae_model=None, **kwargs):
         if mae_model is None:
             super(MaskedIPViT, self).__init__(**kwargs)
         else:
             super(MaskedIPViT, self).__init__(**mae_model.kwargs)
             self.load_state_dict(mae_model.state_dict(), strict=False)
 
-        self.idx2v_method = extend_idx2v_method(idx2v_method, len(self.blocks))
+        self.idx2ip_method = extend_idx2ip_method(idx2ip_method, len(self.blocks))
         ########################################################################
         # Make the LayerNorms starting a block an Affine layer if the block is
         # preceeded by a LocalAdaIN
         idx2block = []
         for idx,b in enumerate(self.blocks):
             prev_block_idx = idx - 1
-            if (prev_block_idx in self.idx2v_method
-                and isinstance(self.idx2v_method[prev_block_idx], LocalAdaIN)):
+            if (prev_block_idx in self.idx2ip_method
+                and isinstance(self.idx2ip_method[prev_block_idx], LocalAdaIN)):
                 idx2block.append(Affine.make_block_start_with_affine(b))
             else:
                 idx2block.append(b)
 
         # Make some blocks implicit probabilistic
         idx2block = [IPBlock(b, vm) if vm else b
-            for b,vm in zip(idx2block, self.idx2v_method.values())]
+            for b,vm in zip(idx2block, self.idx2ip_method.values())]
         self.idx2block = {str(idx): b for idx,b in enumerate(idx2block)}
         self.idx2block = nn.ModuleDict(self.idx2block)
         del self.blocks
@@ -651,11 +651,11 @@ class MaskedIPViT(MaskedAutoencoderViT):
         # Get the mapping for latent codes being put into blocks
         self.block_idx2z_idx = {b_idx: z_idx
             for z_idx,b_idx in enumerate([
-                b_idx for b_idx,vm in self.idx2v_method.items() if vm])}
+                b_idx for b_idx,vm in self.idx2ip_method.items() if vm])}
 
         # If the last encoder block ends with a LocalAdaIN, the decoder norm and
         # the first norm of the first decoder block need to become Affine layers
-        if isinstance(self.idx2v_method[len(idx2block) - 1], LocalAdaIN):
+        if isinstance(self.idx2ip_method[len(idx2block) - 1], LocalAdaIN):
             self.norm = Affine.from_layernorm(self.norm)
             self.decoder_blocks[0] = Affine.make_block_start_with_affine(self.decoder_blocks[0])
         ########################################################################

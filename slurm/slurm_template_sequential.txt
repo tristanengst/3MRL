@@ -2,16 +2,15 @@
 
 # The SBATCH directives must appear before any executable line in this script.
 
-#SBATCH --array=START_CHUNK-END_CHUNK%PARALLEL
-#SBATCH --time=TIME               # Time: D-H:M:S
-#SBATCH --account=ACCOUNT              # Account: def-keli/rrg-keli
-#SBATCH --mem=120G                       # Memory in total
-#SBATCH --nodes=1                       # Number of nodes requested.
-#SBATCH --cpus-per-task=12              # Number of cores per task.
-#SBATCH --gres=gpu:GPU_TYPE:NUM_GPUS        # 40G A100
+#SBATCH --time=TIME
+#SBATCH --account=ACCOUNT
+#SBATCH --mem=100G
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=12
+#SBATCH --gres=gpu:a100:NUM_GPUS
 
 #SBATCH --job-name=NAME
-#SBATCH --output=job_results/_%x_%a.txt
+#SBATCH --output=job_results/%x_%a.txt
 
 # Below sets the email notification, swap to your email to receive notifications
 #SBATCH --mail-user=tristanengst@gmail.com
@@ -20,6 +19,7 @@
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-type=REQUEUE
 #SBATCH --mail-type=ALL
+#SBATCH --mail-type=ARRAY_TASKS
 
 export OMP_NUM_THREADS=1
 # Print some info for context.
@@ -27,14 +27,10 @@ pwd
 hostname
 date
 
-echo "Starting job number $SLURM_ARRAY_TASK_ID"
-
+echo "Starting job $SLURM_JOB_ID"
 source ~/.bashrc
-conda activate py3103MRL
-
-# Python will buffer output of your script unless you set this.
+conda activate py310GPS
 export PYTHONUNBUFFERED=1
-export MKL_SERVICE_FORCE_INTEL=1
 
 SCRIPT
 
