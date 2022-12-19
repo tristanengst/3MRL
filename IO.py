@@ -51,7 +51,7 @@ def add_eval_imle_args(P):
         help="Number of latents per example for logging losses")
     P.add_argument("--z_per_ex_vis", default=8, type=int,
         help="Number of latents per example for logging images")
-    P.add_argument("--probe", default=True, action=argparse.BooleanOptionalAction,
+    P.add_argument("--probe", default=1, choices=[0, 1], type=int,
         help="Whether to periodically conduct fast linear probes")
     P.add_argument("--eval_bs", default=32, type=int,
         help="Batch size for evaluation. The model is computing this times z_per_ex_loss samples each time.")
@@ -174,6 +174,6 @@ def add_hardware_args(P):
         help="Device IDs of GPUs to use")
     P.add_argument("--num_workers", type=int, default=20,
         help="Number of DataLoader workers")
-    P.add_argument("--fp16", default=True, action=argparse.BooleanOptionalAction,
-        help="Whether to use FP16 or FP32 precision training. Sampling is always FP16 since we don't need gradients.")
+    P.add_argument("--fp16", choices=[0, 1], type=int, default=1,
+        help="Whether to use FP16 or FP32 precision training.")
     return P
