@@ -6,7 +6,7 @@
 #SBATCH --account=ACCOUNT
 #SBATCH --mem=100G
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=NUM_CPUS
 #SBATCH --gres=gpu:a100:NUM_GPUS
 
 #SBATCH --job-name=NAME

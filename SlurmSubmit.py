@@ -118,7 +118,7 @@ if __name__ == "__main__":
         args = get_args(unparsed_args)
         args, file_move_command = get_args_with_data_on_node(args, ["data_tr", "data_val"])
 
-        NUM_GPUS = str(len(args.gpus))
+        NUM_GPUS = len(args.gpus)
         NAME = model_folder(args, make_folder=False)
         NAME = NAME.replace(f"{args.save_folder}/models/", "").replace("/", "_")
         
@@ -133,7 +133,8 @@ if __name__ == "__main__":
     template = template.replace("SCRIPT", SCRIPT)
     template = template.replace("TIME", get_time(submission_args.time))
     template = template.replace("NAME", NAME)
-    template = template.replace("NUM_GPUS", NUM_GPUS)
+    template = template.replace("NUM_GPUS", str(NUM_GPUS))
+    template = template.replace("NUM_GPUS", str(max(1, NUM_GPUS) * 12))
     template = template.replace("ACCOUNT", submission_args.account)
     template = template.replace("GPU_TYPE", GPU_TYPE)
     slurm_script = f"slurm/{NAME}.sh"
