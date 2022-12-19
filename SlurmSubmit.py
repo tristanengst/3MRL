@@ -10,6 +10,8 @@ def unparse_args(args):
     for k,v in vars(args).items():
         if isinstance(v, (list, tuple)):
             s += f" --{k} {' '.join([str(v_) for v_ in v])}"
+        elif isinstance(v, None):
+            continue
         else:
             s += f" --{k} {v}"
     return s
