@@ -43,9 +43,9 @@ def add_train_imle_debugging_args(P):
 def add_eval_imle_args(P):
     P.add_argument("--ex_for_mse_loss", type=int, default=2048,
         help="Number of examples for the fast linear probe")
-    P.add_argument("--ex_for_vis_tr", default=8,
+    P.add_argument("--ex_for_vis_tr", default=8, type=int,
         help="Number of training examples for logging")
-    P.add_argument("--ex_for_vis_te", default=8,
+    P.add_argument("--ex_for_vis_te", default=8, type=int,
         help="Number of training examples for logging")
     P.add_argument("--z_per_ex_loss", default=128, type=int,
         help="Number of latents per example for logging losses")
