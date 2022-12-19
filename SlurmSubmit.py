@@ -145,4 +145,5 @@ if __name__ == "__main__":
     tqdm.write(f"Launch command: {launch_command}")
     tqdm.write(f"Script:\n{SCRIPT}")
     tqdm.write(f"SLURM submission script written to {slurm_script}")
+    tqdm.write(f"Outputs will write to job_results/{NAME}.txt")
     os.system(f"sbatch {slurm_script}")
