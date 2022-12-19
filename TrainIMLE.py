@@ -171,7 +171,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
                     args=args)
                 z = {"mask_noise": mask_noise[start:stop]} | latents
                 
-                with torch.cuda.amp.autocast(enabled=args.fp16):
+                with torch.cuda.amp.autocast(enabled=bool(args.fp16)):
                     losses = model(x, z,
                         mask_ratio=args.mask_ratio,
                         reduction="batch").view(bs, args.sp)
@@ -206,7 +206,7 @@ def get_image_latent_dataset(model, dataset, latent_spec, args, epoch=0):
             latents = sample_latent_dict(latents_only_spec, bs=bs, args=args)
             z = {"mask_noise": mask_noise[start:stop]} | latents
             
-            with torch.cuda.amp.autocast(enabled=args.fp16):
+            with torch.cuda.amp.autocast(enabled=bool(args.fp16)):
                 ignore_z_losses[start:stop] = model(x, z,
                     ignore_z=True,
                     mask_ratio=args.mask_ratio,
@@ -653,7 +653,7 @@ if __name__ == "__main__":
     ############################################################################
     # Begin training
     ############################################################################        
-    scaler = torch.cuda.amp.GradScaler(init_scale=1, enabled=args.fp16)
+    scaler = torch.cuda.amp.GradScaler(init_scale=1, enabled=bool(args.fp16))
     log_iter = max(1, int((args.epochs - (last_epoch + 1)) * args.ipe / 10000))
     tqdm.write(f"LOG: Will log every {log_iter} gradient steps")
     
@@ -704,7 +704,7 @@ if __name__ == "__main__":
             total=gradient_steps,
             leave=False):
 
-            with torch.cuda.amp.autocast(enabled=args.fp16):
+            with torch.cuda.amp.autocast(enabled=bool(args.fp16)):
                 loss = model(x, z,
                     mask_ratio=args.mask_ratio,
                     ignore_z=args.ignore_z)
