@@ -29,7 +29,7 @@ date
 
 echo "Starting job $SLURM_JOB_ID"
 source ~/.bashrc
-conda activate py310GPS
+conda activate py3103MRL
 export PYTHONUNBUFFERED=1
 
 SCRIPT
