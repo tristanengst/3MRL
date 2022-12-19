@@ -24,7 +24,7 @@ def get_args_with_data_on_node(args, arg_names_to_move, out_dir="$SLURM_TMPDIR")
     args = vars(args)
     for a in arg_names_to_move:
         if a in args and isinstance(args[a], str) and os.path.exists(args[a]):
-            s += f"rsync -rav --relative {args[a]} {out_dir}/"
+            s += f"rsync -rav --relative {args[a]} {out_dir}/\n"
             args[a] = f"{out_dir}/{args[a]}".replace("//", "/").strip("/")
         else:
             continue
