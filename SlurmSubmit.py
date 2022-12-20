@@ -4,6 +4,8 @@ import random
 from tqdm import tqdm
 from Utils import *
 
+import TrainIMLE
+
 def unparse_args(args):
     """Returns [args] as a string that can be parsed again."""
     s = ""
@@ -68,74 +70,55 @@ if __name__ == "__main__":
         help="Number of GPUs per node")
     P.add_argument("--use_torch_distributed", type=int, choices=[0, 1], default=0,
         help="Whether to launch with 'python -m torch.distributed.launch' or with 'python'")
-    submission_args, unparsed_args = P.parse_known_args()
+    slurm_args, unparsed_args = P.parse_known_args()
 
     ############################################################################
     # Figure out the commands to instantiate the required Python environment
     # based on the given cluster, the command to launch training on the compute
     # node(s), and initialize the command to move files onto the compute node.
     ############################################################################
-    tqdm.write(f"Will use Python environment setup for cluster {submission_args.cluster}")
-    if submission_args.cluster == "cedar":
+    tqdm.write(f"Will use Python environment setup for cluster {slurm_args.cluster}")
+    if slurm_args.cluster == "cedar":
         GPU_TYPE = "v100l"
-    elif submission_args.cluster == "narval":
+    elif slurm_args.cluster == "narval":
         GPU_TYPE = "a100"
-    elif submission_args.cluster == "beluga":
+    elif slurm_args.cluster == "beluga":
         GPU_TYPE = "v100"
     else:
-        raise ValueError(f"Unknown cluster {submission_args.cluster}")
+        raise ValueError(f"Unknown cluster {slurm_args.cluster}")
 
-    if submission_args.use_torch_distributed:
-        launch_command = f"python -m torch.distributed.launch --nproc_per_node={submission_args.nproc_per_node}"
+    if slurm_args.use_torch_distributed:
+        launch_command = f"python -m torch.distributed.launch --nproc_per_node={slurm_args.nproc_per_node}"
     else:
         launch_command = "python"
 
     ############################################################################
     # Get script-specific argument settings
     ############################################################################
-    if submission_args.script == "LinearProbe.py":
-        from LinearProbe import get_args, get_linear_probe_folder
-
-        unparsed_args += [f"--world_size", f"{submission_args.nproc_per_node}"]
-
-        file_move_command, unparsed_args = get_file_move_command(unparsed_args)
-        args = get_args(unparsed_args)
-
-        START_CHUNK = "0"
-        END_CHUNK = "0"
-        PARALLEL = "1"
-        NUM_GPUS = str(submission_args.nproc_per_node)
-        NAME = get_linear_probe_folder(args, make_folder=False)
-        NAME = NAME.replace(f"{project_dir}/models/", "").replace("/", "_")
-
-        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {' '.join(unparsed_args)}"
-        
-        template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
-        with open(template, "r") as f:
-            template = f.read()
-    elif submission_args.script == "TrainIMLE.py":
+    if slurm_args.script == "LinearProbe.py":
+        raise NotImplementedError()
+    elif slurm_args.script == "TrainIMLE.py":
         from TrainIMLE import get_args, model_folder
         args = get_args(unparsed_args)
         args, file_move_command = get_args_with_data_on_node(args, ["data_tr", "data_val"])
 
+        NAME = f"model_{os.path.basename(os.path.dirname(model_folder(args, make_folder=False)))}"
         NUM_GPUS = len(args.gpus)
-        NAME = model_folder(args, make_folder=False)
-        NAME = NAME.replace(f"{args.save_folder}/models/", "").replace("/", "_")
-        
-        SCRIPT = f"{file_move_command}\n{launch_command} {submission_args.script} {unparse_args(args)} --num_workers 12 --save_folder ~/scratch/3MRL"
+        NUM_CPUS = min(24, max(1, NUM_GPUS) * 12)
+        SCRIPT = f"{file_move_command}\n{launch_command} {slurm_args.script} {unparse_args(args)} --num_workers {NUM_CPUS} --save_folder ~/scratch/3MRL"
         
         template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
         with open(template, "r") as f:
             template = f.read()
     else:
-        raise ValueError(f"Unknown script '{submission_args.script}")
+        raise ValueError(f"Unknown script '{slurm_args.script}")
 
     template = template.replace("SCRIPT", SCRIPT)
-    template = template.replace("TIME", get_time(submission_args.time))
+    template = template.replace("TIME", get_time(slurm_args.time))
     template = template.replace("NAME", NAME)
     template = template.replace("NUM_GPUS", str(NUM_GPUS))
-    template = template.replace("NUM_GPUS", str(max(1, NUM_GPUS) * 12))
-    template = template.replace("ACCOUNT", submission_args.account)
+    template = template.replace("NUM_CPUS", str(NUM_GPUS))
+    template = template.replace("ACCOUNT", slurm_args.account)
     template = template.replace("GPU_TYPE", GPU_TYPE)
     slurm_script = f"slurm/{NAME}.sh"
 
