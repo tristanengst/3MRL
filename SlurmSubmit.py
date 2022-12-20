@@ -41,7 +41,7 @@ def get_time(hours):
     Args:
     hours   (int) -- the number of hours to run one chunk for
     """
-    total_seconds = (hours * 3600) - 1
+    total_seconds = int(hours * 3600) - 1
     days = total_seconds // (3600 * 24)
     total_seconds = total_seconds % (3600 * 24)
     hours = total_seconds // 3600
@@ -54,7 +54,7 @@ if __name__ == "__main__":
     P = argparse.ArgumentParser()
     P.add_argument("script",
         help="Script to run")
-    P.add_argument("--time", type=int, default=3,
+    P.add_argument("--time", type=float, default=3,
         help="Number of hours per task")
     P.add_argument("--parallel", type=int, default=1,
         help="Number of tasks to run in parallel")
