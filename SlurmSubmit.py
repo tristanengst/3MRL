@@ -98,11 +98,10 @@ if __name__ == "__main__":
     if slurm_args.script == "LinearProbe.py":
         raise NotImplementedError()
     elif slurm_args.script == "TrainIMLE.py":
-        from TrainIMLE import get_args, model_folder
-        args = get_args(unparsed_args)
+        args = TrainIMLE.get_args(unparsed_args)
         args, file_move_command = get_args_with_data_on_node(args, ["data_tr", "data_val"])
 
-        NAME = f"model_{os.path.basename(os.path.dirname(model_folder(args, make_folder=False)))}"
+        NAME = f"model_{os.path.basename(TrainIMLE.model_folder(args, make_folder=False))}"
         NUM_GPUS = len(args.gpus)
         NUM_CPUS = min(24, max(1, NUM_GPUS) * 12)
         SCRIPT = f"{file_move_command}\n{launch_command} {slurm_args.script} {unparse_args(args)} --num_workers {NUM_CPUS} --save_folder ~/scratch/3MRL"
