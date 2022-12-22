@@ -16,7 +16,7 @@ from original_code.models_vit import VisionTransformer
 from original_code.util import pos_embed as PE
 
 from Utils import *
-from Blocks import AdaIN, LocalAdaIN
+from Blocks import AdaIN, LocalAdaIN, MLP
 from Augmentation import de_normalize
 
 class Affine(nn.Module):
@@ -200,7 +200,7 @@ class MaskedAutoencoderViT(nn.Module):
         mask = torch.gather(mask, dim=1, index=ids_restore)
         return x_masked, mask, ids_restore
 
-    def forward_encoder(self, x, mask_ratio):
+    def forward_encoder(self, x, mask_ratio, mask_noise=None):
         # embed patches
         x = self.patch_embed(x)
 
@@ -208,7 +208,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = x + self.pos_embed[:, 1:, :]
 
         # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        x, mask, ids_restore = self.random_masking(x, mask_ratio, mask_noise=mask_noise)
 
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
@@ -750,6 +750,110 @@ class MaskedIPViT(MaskedAutoencoderViT):
         latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio,
             ignore_z=ignore_z)
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+        loss = self.forward_loss(x, pred, mask,
+            reduction=reduction,
+            mask_ratio=mask_ratio)
+        
+        if return_all:
+            pred, mask = restore_model_outputs(pred, mask, self.patch_embed,
+                self.unpatchify)
+            return loss, pred, mask
+        else:
+            return loss
+
+class MaskedIPViTSampledMaskToken(MaskedAutoencoderViT):
+
+    """Masked VAE with VisionTransformer backbone.
+
+    Args:
+    mae_model       -- None or MaskedAutoencoderViT instance. If the former,
+                        values in [kwargs] are used to specify the ViT
+                        architecture; if the latter, the architecture of
+                        [mae] model is used to for this one
+    **kwargs        -- same kwargs as for a MaskedAutoencoderViT. Ignored if
+                        [mae_model] is specified.
+    """
+    def __init__(self, mae_model=None, **kwargs):
+        if mae_model is None:
+            super(MaskedIPViTSampledMaskToken, self).__init__(**kwargs)
+        else:
+            super(MaskedIPViTSampledMaskToken, self).__init__(**mae_model.kwargs)
+            self.load_state_dict(mae_model.state_dict(), strict=False)
+
+        self.mask_token_shape = self.patch_embed.patch_size[0] * self.patch_embed.patch_size[0] * 2
+        self.adain =  AdaIN(c=self.mask_token_shape)
+
+        tqdm.write(f"{self.__class__.__name__} [num_blocks {len(self.blocks)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}]")
+
+    def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
+        """Returns the latent specification for the network. Requires that the
+        model is on the "cuda" device.
+
+        Args:
+        test_input  -- a BSxCxHxW tensor to be used as the test input
+        input_size  -- spatial resolution of a tensor to be used in place of
+                        [test_input] if [test_input] is None
+        mask_ratio  -- mask ratio
+        """
+        if not input_size is None and test_input is None:
+            test_input = torch.ones(4, 3, input_size, input_size, device="cuda")
+
+        shapes = []
+        with torch.no_grad():
+            x = self.patch_embed(test_input)
+            x = x + self.pos_embed[:, 1:, :]
+
+            # Shape of noise needed for the mask
+            mask_noise_shape = (x.shape[1],)
+
+        return {"mask_noise": mask_noise_shape,
+                "mask_noise_type": "uniform",
+                "latents": (512,)}
+
+    def forward_decoder(self, x, z, ids_restore):
+        x = x.repeat_interleave(len(z) // len(x), dim=0)
+        ids_restore = ids_restore.repeat_interleave(len(x) // len(ids_restore), dim=0)
+        mask_tokens = self.adain(self.mask_token, z)
+        mask_tokens = mask_tokens.repeat(1, ids_restore.shape[1] + 1 - x.shape[1], 1)
+
+        # embed tokens
+        x = self.decoder_embed(x)
+
+        # append mask tokens to sequence
+        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
+        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+        x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
+
+        # add pos embed
+        x = x + self.decoder_pos_embed
+
+        # apply Transformer blocks
+        for blk in self.decoder_blocks:
+            x = blk(x)
+
+        x = self.decoder_norm(x)
+
+        # predictor projection
+        x = self.decoder_pred(x)
+
+        # remove cls token
+        x = x[:, 1:, :]
+        return x
+
+    def forward(self, x, z, mask_ratio=0.75, reduction="mean", return_all=False, ignore_z=False):
+        """Forward function returning the loss, reconstructed image, and mask.
+
+        Args:
+        x           -- BSxCxHxW tensor of images to encode
+        z           -- dictionary with keys 'mask_noise' and 'latents'. Each
+                        should map to a BSx... tensor with the non-zero
+                        dimensions given by get_latent_spec().
+        mask_ratio  -- mask ratio
+        reduction   -- reduction applied to returned loss
+        return_all  -- whether to return a (loss, images, masks) tuple or loss
+        """
+        latent, mask, ids_restore = self.forward_encoder(x, mask_ratio, mask_noise=z["mask_noise"])
+        pred = self.forward_decoder(latent, z["latents"], ids_restore)
         loss = self.forward_loss(x, pred, mask,
             reduction=reduction,
             mask_ratio=mask_ratio)

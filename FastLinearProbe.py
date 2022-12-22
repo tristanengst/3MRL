@@ -96,6 +96,7 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None, verbose=True
             idx2v_method=model.idx2v_method,
             global_pool=args.global_pool,
             noise=args.noise)
+
         interpolate_pos_embed(backbone, model.state_dict())
         _ = backbone.load_state_dict(model.state_dict(), strict=False)
         backbone = backbone.to(device)

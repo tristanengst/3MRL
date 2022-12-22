@@ -376,7 +376,14 @@ def get_masked_ipvit_model(args):
         raise NotImplementedError()
     mae.load_state_dict(mae_model_state)
     model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
-    model = MaskedIPViT(parse_ip_spec(args), **model_kwargs)
+
+    if args.script == "imle-mask-tokens":
+        model = MaskedIPViTSampledMaskToken(**model_kwargs)
+    elif args.script == "imle-encoder-block-outputs" or args.script == "mae":
+        model = MaskedIPViT(parse_ip_spec(args), **model_kwargs)
+    else:
+        raise NotImplementedError()
+    
     model = model.to(torch.float32)
     return model
 
@@ -479,16 +486,19 @@ def get_args(args=None):
 
     args = P.parse_args() if args is None else P.parse_args(args)
     args.save_folder = args.save_folder.strip("/")
-
     args.uid = wandb.util.generate_id() if args.uid is None else args.uid
+
+    if ((args.val_n_way > args.train_n_way)
+        or args.val_n_way == -1 and not args.train_n_way == -1):
+        tqdm.write(f"Setting VAL_N_WAY to {args.train_n_way} to match TRAIN_N_WAY")
+        args.val_n_way = args.train_n_way
 
     if args.scheduler == "constant" and not args.n_ramp == 0:
         raise ValueError(f"Can not ramp constant scheduler. Set --n_ramp to zero")
 
     if len(args.ip_spec) == 0:
         tqdm.write(f"WARNING: empty --ip_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
-        args.z_per_ex_vis = 1
-        args.z_per_ex_loss = 1
+        
     if args.sp > args.ns:
         tqdm.write(f"WARNING: --sp must be at most --ns. Setting --sp to --ns.")
         args.sp = args.ns
@@ -501,7 +511,12 @@ def get_args(args=None):
     if args.lr_z == -1:
         args.lr_z = args.lr
 
-    args.script = "MAE" if args.ignore_z else "MAE-IMLE"
+    if args.script is None:
+        args.script = "mae" if args.ignore_z else "mae-imle"
+    else:
+        if args.ignore_z and "imle" in args.script:
+            raise ValueError(f"Should not run with --ignore_z set and 'imle' in the script.")
+
     return args
 
 
@@ -563,11 +578,6 @@ if __name__ == "__main__":
     Misc.pretty_print_args(args)
     tqdm.write(f"LOG: Will save to {model_folder(args)}")
     
-    # tqdm.write(f"MODEL\n{model}")
-    # tqdm.write(f"OPTIMIZER\n{optimizer}")
-    # tqdm.write(f"LATENT_SPEC\n{latent_spec}")
-
-
     ############################################################################
     # Get the data and KKM. If resuming from an MAE checkpoint, we need to train
     # on all of ImageNet or any improvements can be attributed to overfitting
