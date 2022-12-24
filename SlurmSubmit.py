@@ -116,7 +116,7 @@ if __name__ == "__main__":
     template = template.replace("TIME", get_time(slurm_args.time))
     template = template.replace("NAME", NAME)
     template = template.replace("NUM_GPUS", str(NUM_GPUS))
-    template = template.replace("NUM_CPUS", str(NUM_GPUS))
+    template = template.replace("NUM_CPUS", str(NUM_CPUS))
     template = template.replace("ACCOUNT", slurm_args.account)
     template = template.replace("GPU_TYPE", GPU_TYPE)
     slurm_script = f"slurm/{NAME}.sh"
