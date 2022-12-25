@@ -21,20 +21,24 @@ for f in tqdm(files):
     ###########################################################################
     # Jobs that are complete and synced can be removed.
     ###########################################################################
-    with open("wandb_sync_results.txt", "r") as sync_result_file:
-        sync_result = sync_result_file.read()
+    if os.path.exists("wandb_sync_results.txt"):
+        with open("wandb_sync_results.txt", "r") as sync_result_file:
+            sync_result = sync_result_file.read()
 
-    sync_success = sync_result.strip().endswith("done.")
-    job_complete = os.path.exists(f"{f}/files/wandb-summary.json")
-    
-    if sync_success and job_complete:
-        shutil.rmtree(f)
-        tqdm.write(f"job {f} completed and synced successfully, removing... :)")
-    elif sync_success and not job_complete:
-        tqdm.write(f"job {f} synced successfully :)")
-        pass    
-    elif not sync_success:
-        tqdm.write(f"job {f} encountered an error in syncing :( ")
-        pass
-
-os.remove("wandb_sync_results.txt")
+        sync_success = sync_result.strip().endswith("done.")
+        job_complete = os.path.exists(f"{f}/files/wandb-summary.json")
+        
+        if sync_success and job_complete:
+            shutil.rmtree(f)
+            tqdm.write(f"job {f} completed and synced successfully, removing... :)")
+        elif sync_success and not job_complete:
+            tqdm.write(f"job {f} synced successfully :)")
+            pass    
+        elif not sync_success:
+            tqdm.write(f"job {f} encountered an error in syncing :( ")
+            pass
+    else:
+        tqdm.write(f"WandB sync did not create results file. Ignoring...")
+        continue
+        
+    os.remove("wandb_sync_results.txt")
