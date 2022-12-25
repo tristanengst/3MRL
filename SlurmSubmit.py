@@ -104,7 +104,7 @@ if __name__ == "__main__":
         NAME = f"model_{os.path.basename(TrainIMLE.model_folder(args, make_folder=False))}"
         NUM_GPUS = len(args.gpus)
         NUM_CPUS = min(24, max(1, NUM_GPUS) * 12)
-        SCRIPT = f"{file_move_command}\n{launch_command} {slurm_args.script} {unparse_args(args)} --num_workers {NUM_CPUS} --save_folder '~/scratch/3MRL'"
+        SCRIPT = f"{file_move_command}\n{launch_command} {slurm_args.script} {unparse_args(args)} --num_workers {NUM_CPUS} --save_folder '~/scratch/3MRL' --wandb offline"
         
         template = f"{os.path.dirname(__file__)}/slurm/slurm_template_sequential.txt"
         with open(template, "r") as f:
