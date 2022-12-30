@@ -186,7 +186,7 @@ class ImageFolderSubset(Dataset):
         self.data_target2idx = {t: idx for idx,t in enumerate(sorted(data_targets))}
         self.targets = [self.data_target2idx[t] for t in data_idx2target.values()]
 
-    def __str__(self): return f"{self.__class__.__name__} [root={self.root} | length={self.__len__()}]"
+    def __str__(self): return f"{self.__class__.__name__} [root={self.root} | length={self.__len__()} classes={self.classes}]"
 
     def __len__(self): return len(self.indices)
 

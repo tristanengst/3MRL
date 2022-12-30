@@ -71,10 +71,10 @@ def add_train_imle_args(P):
     P.add_argument("--ignore_z", choices=[0, 1], type=int, default=0,
         help="Whether to not use IMLE")
     
-    P.add_argument("--data_tr", default="../Data/imagenet/train", 
+    P.add_argument("--data_tr", default="~/scratch/Data/imagenet/train", 
         type=argparse_file_type,
         help="String specifying training data")
-    P.add_argument("--data_val", default="../Data/imagenet/val", 
+    P.add_argument("--data_val", default="~/scratch/Data/imagenet/val", 
         type=argparse_file_type,
         help="String specifying finetuning data")
     P.add_argument("--train_n_way", type=int, default=-1,
@@ -153,9 +153,9 @@ def add_linear_probe_args(P):
         help="Linear probe training batch size")
     P.add_argument("--probe_bs_val", type=int, default=256,
         help="Linear probe test/data gathering batch size")
-    P.add_argument("--val_n_way", type=int, default=32,
+    P.add_argument("--probe_n_way", type=int, default=32,
         help="Number of classes in probe/finetune data")
-    P.add_argument("--val_n_shot", type=int, default=50,
+    P.add_argument("--probe_n_shot", type=int, default=50,
         help="Number of examples per class in probe/finetune data")
     P.add_argument("--probe_lr", type=float, default=1e-3,
         help="Linear probe base learning rate")

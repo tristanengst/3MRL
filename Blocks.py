@@ -3,6 +3,69 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm as tqdm
 
+class Affine(nn.Module):
+    """Applies a learned affine transformation over the last axis of the
+    input.
+
+    Args:
+    dim     -- dimensionality of the last axis of the input
+    weight  -- 
+    bias    --
+    """
+    def __init__(self, dim=None, weight=None, bias=None):
+        super(Affine, self).__init__()
+        self.weight = nn.Parameter(torch.randn(dim)) if weight is None else nn.Parameter(weight.squeeze().detach())
+        self.bias = nn.Parameter(torch.randn(dim)) if bias is None else nn.Parameter(bias.squeeze().detach())
+        self.dim = self.bias.shape[0]
+
+    def __str__(self): return f"{self.__class__.__name__} [dim={self.dim}]"
+
+    def forward(self, x):
+        return x * self.weight + self.bias
+
+    @staticmethod
+    def from_layernorm(l):
+        """Returns an Affine layer with the parameters of LayerNorm [l]."""
+        return Affine(weight=l.weight.detach(), bias=l.bias.detach())
+
+    @staticmethod
+    def make_block_start_with_affine(b):
+        """Returns transformer block [b] with its first LayerNorm an equivalent
+        Affine layer.
+        """
+        if isinstance(b, IPBlock):
+            b.block.norm1 = Affine.from_layernorm(b.block.norm1)
+        else:
+            b.norm1 = Affine.from_layernorm(b.norm1)
+        return b
+
+class Block_(nn.Module):
+
+    def __init__(self, block):
+        super(Block_, self).__init__()
+        self.block = block
+
+    def forward(self, x, *args, **kwargs): return self.block(x)
+
+class IPMethod(nn.Module):
+    """Method for mapping noise to latent codes and fusing it with a
+    representation.
+    """
+    def __init__(self, code_dim=512):
+        super(IPMethod, self).__init__()
+        self.code_dim = code_dim
+
+    def get_latent_codes(self, bs=1, seed=None, device="cuda"):
+        x = torch.zeros(bs, self.code_dim, device=device)
+        if seed is None:
+            generator = None
+        else:
+            generator = torch.Generator(device=device).manual_seed(seed)
+        x.normal_(generator=generator)
+        return x
+
+    def forward(self, x): raise NotImplementedError()
+
 def get_act(act_type):
     """Returns an activation function of type [act_type]."""
     if act_type == "gelu":
@@ -94,7 +157,7 @@ class MLP(nn.Module):
                 
     def forward(self, x): return self.model(x)
 
-class AdaIN(nn.Module):
+class AdaIN(IPMethod):
     """AdaIN adapted for a transformer. Expects a BSxNPxC batch of images, where
     each image is represented as a set of P tokens, and BSxPxZ noise. This noise
     is mapped to be BSx1x2C. These are used to scale the image patches, ie. in
@@ -102,13 +165,14 @@ class AdaIN(nn.Module):
     kth element of any other patch in that image.
     """
     def __init__(self, c, epsilon=1e-8, act_type="leakyrelu", normalize_z=True):
-        super(AdaIN, self).__init__()
+        super(AdaIN, self).__init__(code_dim=512)
         self.register_buffer("epsilon", torch.tensor(epsilon))
         self.c = c
-
+        
         layers = []
         if normalize_z:
             layers.append(("normalize_z", PixelNormLayer(epsilon=epsilon)))
+        
         layers.append(("mapping_net", MLP(in_dim=512,
             h_dim=512,
             layers=8,
@@ -118,16 +182,20 @@ class AdaIN(nn.Module):
 
         self.model = nn.Sequential(OrderedDict(layers))
 
-        
-    def get_latent_spec(self, x): return (512,)
-
-    def forward(self, x, z):
+    def forward(self, x, latent_codes=None, seed=None, codes_per_ex=1, ignore_z=False):
         """
         Args:
         x   -- image features
-        z   -- latent codes
+        z   -- latent codes or False for acting like an identity function
         """
-        z = self.model(z)
+        if ignore_z:
+            return torch.repeat_interleave(x, codes_per_ex, dim=0) 
+
+        if latent_codes is None:
+            latent_codes = self.get_latent_codes(bs=len(x) * codes_per_ex, seed=seed,
+                device=x.device)
+
+        z = self.model(latent_codes)
         z_mean = z[:, :self.c]
         z_std = z[:, self.c:]
 
@@ -137,7 +205,7 @@ class AdaIN(nn.Module):
         result = z_mean + x * (1 + z_std)
         return result
 
-class LocalAdaIN(nn.Module):
+class LocalAdaIN(IPMethod):
     """AdaIN adapted for a transformer. Expects a BSxNPxC batch of images, where
     each image is represented as a set of P tokens, and BSxPxZ noise. This noise
     is mapped to be BSxNPx2. These are used to scale the image patches, ie. each
@@ -146,7 +214,7 @@ class LocalAdaIN(nn.Module):
     CAN NOT BE FOLLOWED BY LAYER NORM OR DOES PLAIN MAE.
     """
     def __init__(self, c, epsilon=1e-8, act_type="leakyrelu", normalize_z=True):
-        super(LocalAdaIN, self).__init__()
+        super(LocalAdaIN, self).__init__(code_dim=512)
         self.register_buffer("epsilon", torch.tensor(epsilon))
         self.c = c
 
@@ -161,11 +229,8 @@ class LocalAdaIN(nn.Module):
             act_type=act_type)))
 
         self.model = nn.Sequential(OrderedDict(layers))
-
         
-    def get_latent_spec(self, x): return (512,)
-
-    def forward(self, x, z):
+    def forward(self, x, latent_codes=None, seed=None, codes_per_ex=1):
         """Returns the LocalAdaINification of [x] given codes [z]. As the
         network assumes a fixed number of patches, only cases where [x] has the
         right number will be scaled; otherwise this functions like an identity
@@ -175,16 +240,21 @@ class LocalAdaIN(nn.Module):
         x   -- image features
         z   -- latent codes
         """
-        if x.shape[1] == self.c:
-            z = self.model(z)
-            z_mean = z[:, :self.c]
-            z_std = z[:, self.c:]
+        if ignore_z:
+            x = torch.repeat_interleave(x, codes_per_ex, dim=0) 
 
-            x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
-            z_mean = z_mean.unsqueeze(-1).expand(*x.shape)
-            z_std = z_std.unsqueeze(-1).expand(*x.shape)
-            result = z_mean + x * (1 + z_std)
-            return result
-        else:
-            return x
+        if latent_codes is None:
+            latent_codes = self.get_latent_codes(bs=len(x) * codes_per_ex, seed=seed,
+                device=x.device)
+        
+        
+        z = self.model(latent_codes)
+        z_mean = z[:, :self.c]
+        z_std = z[:, self.c:]
+
+        x = torch.repeat_interleave(x, z.shape[0] // x.shape[0], dim=0)
+        z_mean = z_mean.unsqueeze(1).expand(*x.shape)
+        z_std = z_std.unsqueeze(1).expand(*x.shape)
+        result = z_mean + x * (1 + z_std)
+        return result
 

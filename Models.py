@@ -4,6 +4,7 @@ NOTES:
 1. Pretrained models are available at https://github.com/facebookresearch/mae/issues/8, which isn't the same as those directly linked in the repo.
 """
 from functools import partial
+import os
 from tqdm import tqdm
 
 import torch
@@ -19,42 +20,43 @@ from Utils import *
 from Blocks import AdaIN, LocalAdaIN, MLP
 from Augmentation import de_normalize
 
-class Affine(nn.Module):
-    """Applies a learned affine transformation over the last axis of the
-    input.
+def parse_ip_spec(args):
+    """Returns args.ip_spec as a dictionary mapping transformer block indices to
+    whether and how they should be IP. Blocks whose indices aren't in
+    the mapping are assumed in model __init__ methods to be non-IP and
+    such blocks need not be specified in the returned dictionary.
+    """
+    def parse_ip_spec_helper(s):
+        if s in ["add", "zero"] or not s:
+            return s
+        elif s.startswith("adain"):
+            if "base" in args.arch:
+                return AdaIN(c=768, act_type=args.act_type)
+            elif "large" in args.arch:
+                return AdaIN(c=1024, act_type=args.act_type)
+            else:
+                raise NotImplementedError()
+        elif s.startswith("local_adain"):
+            return LocalAdaIN(c=50, act_type=args.act_type)
+        else:
+            raise NotImplementedError()
+
+    key_args = [int(k) for idx,k in enumerate(args.ip_spec) if idx % 2 == 0]
+    val_args = [v for idx,v in enumerate(args.ip_spec) if idx % 2 == 1]
+    assert len(key_args) == len(val_args)
+    return {k: parse_ip_spec_helper(v) for k,v in zip(key_args, val_args)}
+
+def extend_idx2ip_method(idx2ip_method, length):
+    """Returns [idx2ip_method] extended to [length] by adding key-value pairs
+    where the value is False such that the returned dictionary has the first
+    [length] whole numbers as keys.
 
     Args:
-    dim     -- dimensionality of the last axis of the input
-    weight  -- 
-    bias    --
+    idx2ip_method    -- mapping from the first N whole numbers to how/if blocks
+                        with their index should be IP
+    length          -- length to extend to
     """
-    def __init__(self, dim=None, weight=None, bias=None):
-        super(Affine, self).__init__()
-        self.weight = nn.Parameter(torch.randn(dim)) if weight is None else nn.Parameter(weight.squeeze().detach())
-        self.bias = nn.Parameter(torch.randn(dim)) if bias is None else nn.Parameter(bias.squeeze().detach())
-        self.dim = self.bias.shape[0]
-
-    def __str__(self): return f"{self.__class__.__name__} [dim={self.dim}]"
-
-    def forward(self, x):
-        return x * self.weight + self.bias
-
-    @staticmethod
-    def from_layernorm(l):
-        """Returns an Affine layer with the parameters of LayerNorm [l]."""
-        return Affine(weight=l.weight.detach(), bias=l.bias.detach())
-
-    @staticmethod
-    def make_block_start_with_affine(b):
-        """Returns transformer block [b] with its first LayerNorm an equivalent
-        Affine layer.
-        """
-        if isinstance(b, IPBlock):
-            b.block.norm1 = Affine.from_layernorm(b.block.norm1)
-        else:
-            b.norm1 = Affine.from_layernorm(b.norm1)
-        return b
-
+    return {k: False for k in range(length)} | idx2ip_method
 
 class MaskedAutoencoderViT(nn.Module):
     """Masked Autoencoder with VisionTransformer backbone."""
@@ -64,7 +66,7 @@ class MaskedAutoencoderViT(nn.Module):
         norm_pix_loss=False, verbose=False):
         super(MaskedAutoencoderViT, self).__init__()
 
-        # Save variables needed in making this IP
+        # Save variables needed in making this an implicit model
         self.kwargs = {
             "img_size": img_size,
             "patch_size": patch_size,
@@ -172,7 +174,28 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         return x.reshape(shape=(x.shape[0], 3, h * p, h * p))
 
-    def random_masking(self, x, mask_ratio, mask_noise=None):
+    def get_latent_codes(self, bs=1, device="cuda", seed=None):
+        """Returns a size [bs] vector of "latents" to allow this model to
+        pretend to be an implicit probabilistic model.
+        """
+        return torch.zeros(bs, device=device)
+
+    def get_mask_codes(self, bs=1, device="cuda", seed=None):
+        """Returns mask codes for [bs] images.
+        
+        Args:
+        bs      -- the number of codes to generate
+        device  -- the device to generate the codes on
+        seed    -- the seed used to generate the random noise, or None to use
+                    the current state of randomness
+        """
+        L = self.kwargs["img_size"] ** 2 // (self.kwargs["patch_size"] ** 2)
+        mask_codes = torch.zeros(bs, L, device=device)
+        g = None if seed is None else torch.Generator(device=device).manual_seed(seed)
+        mask_codes.normal_(generator=g)
+        return mask_codes
+
+    def random_masking(self, x, mask_ratio=.75, mask_codes=None, mask_seed=None):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
@@ -186,12 +209,14 @@ class MaskedAutoencoderViT(nn.Module):
         N, L, D = x.shape
         len_keep = int(L * (1 - mask_ratio))
 
-        if mask_noise is None:  # batch, length, dim
-            mask_noise = torch.rand(N, L, device=x.device)
+        ########################################################################
+        if mask_codes is None:
+            mask_codes = self.get_mask_codes(bs=x.shape[0], device=x.device, seed=mask_seed)
         else:
-            mask_noise = mask_noise
+            mask_codes = mask_codes
+        ########################################################################
             
-        ids_shuffle = torch.argsort(mask_noise, dim=1)
+        ids_shuffle = torch.argsort(mask_codes, dim=1)
         ids_restore = torch.argsort(ids_shuffle, dim=1)
         ids_keep = ids_shuffle[:, :len_keep]
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
@@ -200,22 +225,13 @@ class MaskedAutoencoderViT(nn.Module):
         mask = torch.gather(mask, dim=1, index=ids_restore)
         return x_masked, mask, ids_restore
 
-    def forward_encoder(self, x, mask_ratio, mask_noise=None):
-        # embed patches
+    def forward_encoder(self, x, mask_ratio, mask_codes=None):
         x = self.patch_embed(x)
-
-        # add pos embed w/o cls token
         x = x + self.pos_embed[:, 1:, :]
-
-        # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask_ratio, mask_noise=mask_noise)
-
-        # append cls token
+        x, mask, ids_restore = self.random_masking(x, mask_ratio, mask_codes=mask_codes)
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
-
-        # apply Transformer blocks
         for blk in self.blocks:
             x = blk(x)
         x = self.norm(x)
@@ -223,29 +239,16 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_decoder(self, x, ids_restore):
         ids_restore = ids_restore.repeat_interleave(len(x) // len(ids_restore), dim=0)
-
-        # embed tokens
         x = self.decoder_embed(x)
-
-        # append mask tokens to sequence
         mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
         x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
         x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
         x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
-
-        # add pos embed
         x = x + self.decoder_pos_embed
-
-        # apply Transformer blocks
         for blk in self.decoder_blocks:
             x = blk(x)
-
         x = self.decoder_norm(x)
-
-        # predictor projection
         x = self.decoder_pred(x)
-
-        # remove cls token
         x = x[:, 1:, :]
         return x
 
@@ -276,7 +279,7 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             raise NotImplementedError()
 
-    def forward(self, x, z=None, mask_ratio=0.75, reduction="mean", return_all=False):
+    def forward(self, x, mask_ratio=0.75, reduction="mean", return_all=False):
         """
         Args:
         x           -- BSxCxHxW tensor of images to encode
@@ -295,27 +298,6 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             return loss
 
-    def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
-        """Returns the latent specification for the network. Requires that the
-        model is on the "cuda" device.
-
-        Args:
-        test_input  -- a BSxCxHxW tensor to be used as the test input
-        input_size  -- spatial resolution of a tensor to be used in place of
-                        [test_input] if [test_input] is None
-        mask_ratio  -- mask ratio
-        """
-        if not input_size is None and test_input is None:
-            test_input = torch.ones(4, 3, input_size, input_size, device="cuda")
-
-        with torch.no_grad():
-            x = self.patch_embed(test_input)
-            x = x + self.pos_embed[:, 1:, :]
-            mask_noise_shape = (x.shape[1],)
-            return {"mask_noise": mask_noise_shape,
-                "mask_noise_type": "uniform",
-                "latents": None}
-
 class VisionTransformerBackbone(VisionTransformer):
 
     def __init__(self, *args, **kwargs):
@@ -323,46 +305,6 @@ class VisionTransformerBackbone(VisionTransformer):
 
     def forward(self, *args, **kwargs):
         return super().forward_features(*args, **kwargs)
-
-def parse_ip_spec(args):
-    """Returns args.ip_spec as a dictionary mapping transformer block indices to
-    whether and how they should be IP. Blocks whose indices aren't in
-    the mapping are assumed in model __init__ methods to be non-IP and
-    such blocks need not be specified in the returned dictionary.
-    """
-    def parse_ip_spec_helper(s):
-        if s in ["add", "zero"] or not s:
-            return s
-        elif s.startswith("adain"):
-            if "base" in args.arch:
-                return AdaIN(c=768, act_type=args.act_type)
-            elif "large" in args.arch:
-                return AdaIN(c=1024, act_type=args.act_type)
-            else:
-                raise NotImplementedError()
-        elif s.startswith("local_adain"):
-            return LocalAdaIN(c=50, act_type=args.act_type)
-        else:
-            raise NotImplementedError()
-
-    key_args = [int(k) for idx,k in enumerate(args.ip_spec) if idx % 2 == 0]
-    val_args = [v for idx,v in enumerate(args.ip_spec) if idx % 2 == 1]
-    assert len(key_args) == len(val_args)
-    return {k: parse_ip_spec_helper(v) for k,v in zip(key_args, val_args)}
-
-
-def extend_idx2ip_method(idx2ip_method, length):
-    """Returns [idx2ip_method] extended to [length] by adding key-value pairs
-    where the value is False such that the returned dictionary has the first
-    [length] whole numbers as keys.
-
-    Args:
-    idx2ip_method    -- mapping from the first N whole numbers to how/if blocks
-                        with their index should be IP
-    length          -- length to extend to
-    """
-    return {k: False for k in range(length)} | idx2ip_method
-
 
 class IPBlock(nn.Module):
     """Wraps a vision transformer block and adds noise to its output.
@@ -378,21 +320,13 @@ class IPBlock(nn.Module):
         self.block = block
         self.ip_method = ip_method
 
-    def get_latent_spec(self, test_input):
-        """Returns the latent shape minus the batch dimension for the network.
-
-        Args:
-        test_input  -- a BSxCxHxW tensor to be used as the test input
+    def get_latent_codes(self, bs=1, device=device, seed=None):
+        """Returns [bs] latent codes for the block on device [device] generated
+        with seed [seed], or the current state of randomness if [seed] is None.
         """
-        block_output = self.block(test_input)
-        if self.ip_method == "add":
-            return block_output.shape[1:]
-        elif isinstance(self.ip_method, nn.Module):
-            return self.ip_method.get_latent_spec(block_output)
-        else:
-            raise NotImplementedError()
+        return self.ip_method.get_latent_codes(bs=bs, device=device, seed=seed)        
 
-    def forward(self, x, z, ignore_z=False):
+    def forward(self, x, latent_codes=None, ignore_z=False, codes_per_ex=1, seed=None):
         """Forward function.
 
         Args:
@@ -400,28 +334,16 @@ class IPBlock(nn.Module):
         z   -- either a tensor to use as noise or an nn.Module whose forward
                 function returns the noise. One might use the former type for
                 IMLE training and the latter for density-based linear probing
+        ignore_z
+        codes_per_ex
+        seed
         """
         fx = self.block(x)
-        if ignore_z:
-            return torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
-
-        z = z() if isinstance(z, nn.Module) else z
-        if self.ip_method == "add":
-            fx = torch.repeat_interleave(fx, z.shape[0] // fx.shape[0], dim=0)
-            return fx + z
-        elif isinstance(self.ip_method, nn.Module):
-            return self.ip_method(fx, z)
-        else:
-            raise NotImplementedError()
+        return self.ip_method(fx, latent_codes=latent_codes, codes_per_ex=codes_per_ex, seed=seed, ignore_z=ignore_z)
+            
 
 class IPViT(timm.models.vision_transformer.VisionTransformer):
-    """ViT, but with the ability to add Gaussian noise at some place in the
-    forward pass.
-
-    To construct from a MaskedIPViT model [m]:
-    v = IPViT(idx2ip_method=m.idx2ip_method,
-        encoder_kwargs=m.encoder_kwargs, ...)
-    v.load_state_dict(m.state_dict())
+    """ViT with the ability to add Gaussian noise somewhere in the forward pass.
 
     Args:
     idx2ip_method    -- mapping from from indices to the blocks to whether and
@@ -441,36 +363,37 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
     def __init__(self, idx2ip_method={}, encoder_kwargs=None, global_pool=False,
         num_classes=1000, noise="gaussian", **kwargs):
 
-        # The architecture [v_mae_model] overrides that in [kwargs] if possible
         kwargs = kwargs | {"num_classes": num_classes}
         kwargs = kwargs if encoder_kwargs is None else kwargs | encoder_kwargs
         super(IPViT, self).__init__(**kwargs)
 
         self.idx2ip_method = extend_idx2ip_method(idx2ip_method, len(self.blocks))
         
-        ########################################################################
+       ########################################################################
         # Make the LayerNorms starting a block an Affine layer if the block is
         # preceeded by a LocalAdaIN
-        idx2block = []
+        blocks = []
         for idx,b in enumerate(self.blocks):
             prev_block_idx = idx - 1
             if (prev_block_idx in self.idx2ip_method
                 and isinstance(self.idx2ip_method[prev_block_idx], LocalAdaIN)):
-                idx2block.append(Affine.make_block_start_with_affine(b))
+                blocks.append(Affine.make_block_start_with_affine(b))
             else:
-                idx2block.append(b)
+                blocks.append(b)
 
-        # Make some blocks implicit probabilistic
-        idx2block = [IPBlock(b, vm) if vm else b
-            for b,vm in zip(idx2block, self.idx2ip_method.values())]
-        self.idx2block = {str(idx): b for idx,b in enumerate(idx2block)}
-        self.idx2block = nn.ModuleDict(self.idx2block)
-        del self.blocks
+        # Make some blocks implicit probabilistic given the IP specification
+        self.blocks = nn.ModuleList([IPBlock(b, ipm) if ipm else b for b,ipm in zip(blocks, self.idx2ip_method.values())])
 
-        # Get the mapping for latent codes being put into blocks
-        self.block_idx2z_idx = {b_idx: z_idx
-            for z_idx,b_idx in enumerate([
-                b_idx for b_idx,vm in self.idx2ip_method.items() if vm])}
+        # Create a dictionary that gives the index to the latent codes for the
+        # index of each index of the IP blocks
+        counter = 0
+        self.block_idx2latent_idx = {}
+        for idx,ipm in self.idx2ip_method.items():
+            if ipm:
+                self.block_idx2latent_idx[idx] = counter
+                counter += 1
+        
+        self.first_ip_idx = min(self.block_idx2latent_idx.keys())
 
         ########################################################################
 
@@ -484,81 +407,22 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
         self.latent_spec = None
         self.latent_spec_test_input_dims = None
         self.latent_spec_mask_ratio = None
-
         self.noise = noise
 
-    def set_latent_spec(self, test_input=None, input_size=None, mask_ratio=0):
-        """Sets the three instance variables storing the latent spec. Requires
-        that the model is on the "cuda" device.
+    def get_latent_codes(self, bs, **kwargs):
+        """Returns [bs] latent codes to be input to the model."""
+        result = [block.get_latent_codes(bs, **kwargs)
+            for idx,block in enumerate(self.blocks)
+            if idx in self.block_idx2latent_idx]
+        return torch.stack(result, dim=1)
 
-        Args:
-        test_input  -- a BSxCxHxW tensor to be used as the test input
-        input_size  -- spatial resolution of a tensor to be used in place of
-                        [test_input] if [test_input] is None
-        mask_ratio  -- mask ratio
-        """
-        if (mask_ratio == self.latent_spec_mask_ratio
-            and test_input.shape == self.latent_spec_test_input_dims
-            and not self.latent_spec is None):
-            return None
-        else:
-            self.latent_spec = self.get_latent_spec(test_input=test_input,
-                input_size=input_size,
-                mask_ratio=mask_ratio)
-            self.latent_spec_test_input_dims = test_input.shape
-            self.latent_spec_mask_ratio = mask_ratio
-            return None
-
-    def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
-        """Returns the latent specification for the network. Requires that the
-        model is on the "cuda" device.
-
-        Args:
-        test_input  -- a BSxCxHxW tensor to be used as the test input
-        input_size  -- spatial resolution of a tensor to be used in place of
-                        [test_input] if [test_input] is None
-        mask_ratio  -- mask ratio
-        """
-        if not input_size is None and test_input is None:
-            test_input = torch.ones(4, 3, input_size, input_size, device="cuda")
-
-        shapes = []
-        with torch.no_grad():
-            B = test_input.shape[0]
-            x = self.patch_embed(test_input)
-
-            cls_tokens = self.cls_token.expand(B, -1, -1)
-            x = torch.cat((cls_tokens, x), dim=1)
-            x = x + self.pos_embed
-            x = self.pos_drop(x)
-
-            for idx,block in self.idx2block.items():
-                if int(idx) in self.block_idx2z_idx:
-                    s = block.get_latent_spec(test_input=x)
-                    x = block(x, torch.ones(len(x), *s, device="cuda"))
-                    shapes.append(s)
-                else:
-                    x = block(x)
-
-        if len(set(shapes)) == 0:
-            return {"latents": None}
-        elif len(set(shapes)) == 1:
-            return {"latents": (len(shapes),) + shapes[0]}
-        else:
-            raise ValueError(f"Got multiple shapes for latent codes {shapes}")
-
-    def forward_features(self, x, z=None, z_per_ex=1, noise=None, ignore_z=False):
+    def forward_features(self, x, latent_codes=None, codes_per_ex=1, ignore_z=False, latents_seed=None):
         """Returns representations for [x].
 
         Args:
         x   -- BSxCxHxW images to compute representations for
         z   -- list of noises, one for each IP block
         """
-        if z is None:
-            z = sample_latent_dict(self.latent_spec,
-                bs=len(x) * z_per_ex,
-                noise=self.noise if noise is None else noise)
-
         B = x.shape[0]
         x = self.patch_embed(x)
 
@@ -567,9 +431,13 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        for idx,block in self.idx2block.items():
-            if int(idx) in self.block_idx2z_idx:
-                x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]], ignore_z=ignore_z)
+        for idx,block in enumerate(self.blocks):
+            if idx in self.block_idx2latent_idx:
+                x = block(x,
+                    latent_codes=None if latent_codes is None else latent_codes[:, self.block_idx2latent_idx[idx]],
+                    codes_per_ex=codes_per_ex if idx == self.first_ip_idx else 1,
+                    seed=latents_seed,
+                    ignore_z=ignore_z)
             else:
                 x = block(x)
 
@@ -580,7 +448,7 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
             x = self.norm(x)
             return x[:, 0]
 
-    def forward(self, x, z=None, noise=None, z_per_ex=1, ignore_z=False):
+    def forward(self, x, **kwargs):
         """Forward function for getting class predictions.
 
         Requires that set_latent_spec() has been called on the model.
@@ -588,11 +456,9 @@ class IPViT(timm.models.vision_transformer.VisionTransformer):
         Args:
         x       -- BSxCxHxW tensor of images
         z       -- filled-in latent specification of size matching tha tof [x]
-        noise   -- method for generating [z] if it is None
         z_per_x -- number of latents for example if [z] is None
         """
-        return self.forward_head(self.forward_features(x, z,
-            noise=noise, z_per_ex=z_per_ex, ignore_z=ignore_z))
+        return self.forward_head(self.forward_features(x, **kwargs))
 
 class IPViTBackbone(IPViT):
     """IPViT as a backbone network."""
@@ -632,82 +498,48 @@ class MaskedIPViT(MaskedAutoencoderViT):
         ########################################################################
         # Make the LayerNorms starting a block an Affine layer if the block is
         # preceeded by a LocalAdaIN
-        idx2block = []
+        blocks = []
         for idx,b in enumerate(self.blocks):
             prev_block_idx = idx - 1
             if (prev_block_idx in self.idx2ip_method
                 and isinstance(self.idx2ip_method[prev_block_idx], LocalAdaIN)):
-                idx2block.append(Affine.make_block_start_with_affine(b))
+                blocks.append(Affine.make_block_start_with_affine(b))
             else:
-                idx2block.append(b)
+                blocks.append(b)
 
-        # Make some blocks implicit probabilistic
-        idx2block = [IPBlock(b, vm) if vm else b
-            for b,vm in zip(idx2block, self.idx2ip_method.values())]
-        self.idx2block = {str(idx): b for idx,b in enumerate(idx2block)}
-        self.idx2block = nn.ModuleDict(self.idx2block)
-        del self.blocks
+        # Make some blocks implicit probabilistic given the IP specification
+        self.blocks = nn.ModuleList([IPBlock(b, ipm) if ipm else b for b,ipm in zip(blocks, self.idx2ip_method.values())])
 
-        # Get the mapping for latent codes being put into blocks
-        self.block_idx2z_idx = {b_idx: z_idx
-            for z_idx,b_idx in enumerate([
-                b_idx for b_idx,vm in self.idx2ip_method.items() if vm])}
+        # Create a dictionary that gives the index to the latent codes for the
+        # index of each index of the IP blocks
+        counter = 0
+        self.block_idx2latent_idx = {}
+        for idx,ipm in self.idx2ip_method.items():
+            if ipm:
+                self.block_idx2latent_idx[idx] = counter
+                counter += 1
+        
+        self.first_ip_idx = min(self.block_idx2latent_idx.keys())
 
         # If the last encoder block ends with a LocalAdaIN, the decoder norm and
         # the first norm of the first decoder block need to become Affine layers
-        if isinstance(self.idx2ip_method[len(idx2block) - 1], LocalAdaIN):
+        if isinstance(self.idx2ip_method[len(self.blocks) - 1], LocalAdaIN):
             self.norm = Affine.from_layernorm(self.norm)
             self.decoder_blocks[0] = Affine.make_block_start_with_affine(self.decoder_blocks[0])
         ########################################################################
 
-        tqdm.write(f"{self.__class__.__name__} [num_blocks {len(self.idx2block)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}]")
+        tqdm.write(f"{self.__class__.__name__} [num_blocks {len(self.blocks)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}]")
 
-    def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
-        """Returns the latent specification for the network. Requires that the
-        model is on the "cuda" device.
+    def get_latent_codes(self, bs, **kwargs):
+        """Returns [bs] latent codes to be input to the model."""
+        result = [block.get_latent_codes(bs, **kwargs)
+            for idx,block in enumerate(self.blocks)
+            if idx in self.block_idx2latent_idx]
+        return torch.stack(result, dim=1)
 
-        Args:
-        test_input  -- a BSxCxHxW tensor to be used as the test input
-        input_size  -- spatial resolution of a tensor to be used in place of
-                        [test_input] if [test_input] is None
-        mask_ratio  -- mask ratio
-        """
-        if not input_size is None and test_input is None:
-            test_input = torch.ones(4, 3, input_size, input_size, device="cuda")
-
-        shapes = []
-        with torch.no_grad():
-            x = self.patch_embed(test_input)
-            x = x + self.pos_embed[:, 1:, :]
-
-            # Shape of noise needed for the mask
-            mask_noise_shape = (x.shape[1],)
-
-            x, mask, ids_restore = self.random_masking(x, mask_ratio)
-            cls_token = self.cls_token + self.pos_embed[:, :1, :]
-            cls_tokens = cls_token.expand(x.shape[0], -1, -1)
-            x = torch.cat((cls_tokens, x), dim=1)
-
-            for idx,block in self.idx2block.items():
-                if int(idx) in self.block_idx2z_idx:
-                    s = block.get_latent_spec(test_input=x)
-                    shapes.append(s)
-                    x = block(x, torch.zeros(len(x), *s, device="cuda"))
-                else:
-                    x = block(x)
-
-        if len(set(shapes)) == 0:
-            return {"mask_noise": mask_noise_shape,
-                "mask_noise_type": "uniform",
-                "latents": None}
-        elif len(set(shapes)) == 1:
-            return {"mask_noise": mask_noise_shape,
-                "mask_noise_type": "uniform",
-                "latents": (len(shapes),) + shapes[0]}
-        else:
-            raise ValueError(f"Got multiple shapes for latent codes {shapes}")
-
-    def forward_encoder(self, x, z, mask_ratio, ignore_z=False):
+    def forward_encoder(self, x, mask_ratio=0.75, mask_seed=None,
+        mask_codes=None, latents_seed=None, latent_codes=None, codes_per_ex=1,
+        ignore_z=False):
         """Forward function for the encoder.
 
         Args:
@@ -719,23 +551,31 @@ class MaskedIPViT(MaskedAutoencoderViT):
         """
         x = self.patch_embed(x)
         x = x + self.pos_embed[:, 1:, :]
-
-        x, mask, ids_restore = self.random_masking(x, mask_ratio, mask_noise=z["mask_noise"])
+        x, mask, ids_restore = self.random_masking(x,
+            mask_ratio=mask_ratio,
+            mask_codes=mask_codes,
+            mask_seed=mask_seed)
 
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
-        for idx,block in self.idx2block.items():
-            if int(idx) in self.block_idx2z_idx:
-                x = block(x, z["latents"][:, self.block_idx2z_idx[int(idx)]], ignore_z=ignore_z)
+        for idx,block in enumerate(self.blocks):
+            if idx in self.block_idx2latent_idx:
+                x = block(x,
+                    latent_codes=None if latent_codes is None else latent_codes[:, self.block_idx2latent_idx[idx]],
+                    codes_per_ex=codes_per_ex if idx == self.first_ip_idx else 1,
+                    seed=latents_seed,
+                    ignore_z=ignore_z)
             else:
                 x = block(x)
 
         x = self.norm(x)
         return x, mask, ids_restore
 
-    def forward(self, x, z, mask_ratio=0.75, reduction="mean", return_all=False, ignore_z=False):
+    def forward(self, x, mask_ratio=0.75, reduction="mean", return_all=False,
+        mask_seed=None, mask_codes=None, latents_seed=None, latent_codes=None,
+        codes_per_ex=1, ignore_z=False):
         """Forward function returning the loss, reconstructed image, and mask.
 
         Args:
@@ -747,9 +587,15 @@ class MaskedIPViT(MaskedAutoencoderViT):
         reduction   -- reduction applied to returned loss
         return_all  -- whether to return a (loss, images, masks) tuple or loss
         """
-        latent, mask, ids_restore = self.forward_encoder(x, z, mask_ratio,
+        latent, mask, ids_restore = self.forward_encoder(x,
+            mask_ratio=mask_ratio,
+            mask_seed=mask_seed,
+            mask_codes=mask_codes,
+            latents_seed=latents_seed,
+            latent_codes=latent_codes,
+            codes_per_ex=codes_per_ex,
             ignore_z=ignore_z)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+        pred = self.forward_decoder(latent, ids_restore)
         loss = self.forward_loss(x, pred, mask,
             reduction=reduction,
             mask_ratio=mask_ratio)
@@ -762,7 +608,6 @@ class MaskedIPViT(MaskedAutoencoderViT):
             return loss
 
 class MaskedIPViTSampledMaskToken(MaskedAutoencoderViT):
-
     """Masked VAE with VisionTransformer backbone.
 
     Args:
@@ -780,67 +625,43 @@ class MaskedIPViTSampledMaskToken(MaskedAutoencoderViT):
             super(MaskedIPViTSampledMaskToken, self).__init__(**mae_model.kwargs)
             self.load_state_dict(mae_model.state_dict(), strict=False)
 
-        self.mask_token_shape = self.patch_embed.patch_size[0] * self.patch_embed.patch_size[0] * 2
-        self.adain =  AdaIN(c=self.mask_token_shape)
+        self.mask_token_shape = self.patch_embed.patch_size[0] ** 2 * 2
+        self.adain = AdaIN(c=self.mask_token_shape)
 
         tqdm.write(f"{self.__class__.__name__} [num_blocks {len(self.blocks)} | num_params {sum(p.numel() for p in self.parameters() if p.requires_grad)}]")
 
-    def get_latent_spec(self, test_input=None, input_size=None, mask_ratio=.75):
-        """Returns the latent specification for the network. Requires that the
-        model is on the "cuda" device.
+    def get_latent_codes(self, bs=1, device=device, seed=None):
+        x = torch.zeros(bs, self.adain.code_dim, device=device)
+        g = None if seed is None else torch.Generator(device=device).manual_seed(seed)
+        x.normal_(generator=g)
+        return x
 
-        Args:
-        test_input  -- a BSxCxHxW tensor to be used as the test input
-        input_size  -- spatial resolution of a tensor to be used in place of
-                        [test_input] if [test_input] is None
-        mask_ratio  -- mask ratio
-        """
-        if not input_size is None and test_input is None:
-            test_input = torch.ones(4, 3, input_size, input_size, device="cuda")
+    def forward_decoder(self, x, ids_restore, latent_codes=None, codes_per_ex=1, latents_seed=None, ignore_z=False):
+        if latent_codes is None:
+            latent_codes = self.get_latent_codes(bs=len(x) * codes_per_ex, device=x.device, seed=seed)
 
-        shapes = []
-        with torch.no_grad():
-            x = self.patch_embed(test_input)
-            x = x + self.pos_embed[:, 1:, :]
-
-            # Shape of noise needed for the mask
-            mask_noise_shape = (x.shape[1],)
-
-        return {"mask_noise": mask_noise_shape,
-                "mask_noise_type": "uniform",
-                "latents": (512,)}
-
-    def forward_decoder(self, x, z, ids_restore):
-        x = x.repeat_interleave(len(z) // len(x), dim=0)
+        x = x.repeat_interleave(len(latent_codes) // len(x), dim=0)
         ids_restore = ids_restore.repeat_interleave(len(x) // len(ids_restore), dim=0)
-        mask_tokens = self.adain(self.mask_token, z)
+        mask_tokens = self.adain(self.mask_token,
+            latent_codes=latent_codes,
+            latents_seed=latents_seed,
+            ignore_z=ignore_z)
         mask_tokens = mask_tokens.repeat(1, ids_restore.shape[1] + 1 - x.shape[1], 1)
-
-        # embed tokens
         x = self.decoder_embed(x)
 
-        # append mask tokens to sequence
         x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
         x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
         x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
-
-        # add pos embed
         x = x + self.decoder_pos_embed
-
-        # apply Transformer blocks
         for blk in self.decoder_blocks:
             x = blk(x)
-
         x = self.decoder_norm(x)
-
-        # predictor projection
         x = self.decoder_pred(x)
-
-        # remove cls token
         x = x[:, 1:, :]
         return x
 
-    def forward(self, x, z, mask_ratio=0.75, reduction="mean", return_all=False, ignore_z=False):
+    def forward(self, x, mask_codes=None, latent_codes=None, mask_ratio=0.75,
+        reduction="mean", return_all=False, mask_seed=None, latents_seed=None, codes_per_ex=1):
         """Forward function returning the loss, reconstructed image, and mask.
 
         Args:
@@ -852,8 +673,11 @@ class MaskedIPViTSampledMaskToken(MaskedAutoencoderViT):
         reduction   -- reduction applied to returned loss
         return_all  -- whether to return a (loss, images, masks) tuple or loss
         """
-        latent, mask, ids_restore = self.forward_encoder(x, mask_ratio, mask_noise=z["mask_noise"])
-        pred = self.forward_decoder(latent, z["latents"], ids_restore)
+        latent, mask, ids_restore = self.forward_encoder(x, mask_ratio, mask_codes=mask_codes, mask_seed=mask_seed)
+        pred = self.forward_decoder(latent, ids_restore,
+            latent_codes=latent_codes,
+            latents_seed=latents_seed,
+            codes_per_ex=codes_per_ex)
         loss = self.forward_loss(x, pred, mask,
             reduction=reduction,
             mask_ratio=mask_ratio)
@@ -879,13 +703,42 @@ def restore_model_outputs(pred, mask, patch_embed, unpatchify):
     mask = unpatchify(mask)
     return pred, mask
 
+def get_masked_ipvit_model(args):
+    """Returns an MaskedIPViT model with the weights and architecture of an MAE
+    model specified in [args. Resuming a MaskedIPViT model is not handeled, ie.
+    the model weights are pure MAE weights.
+    """
+    # Instantiate the MAE model we're finetuning
+    if args.arch == "vit_base":
+        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_base_full.pth")["model"]
+        mae = mae_vit_base_patch16(norm_pix_loss=args.norm_pix_loss)
+    elif args.arch == "vit_base_vis":
+        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_visualize_vit_base.pth")["model"]
+        mae = mae_vit_base_patch16(norm_pix_loss=False)
+    elif args.arch == "vit_large":
+        mae_model_state = torch.load(f"{os.path.dirname(__file__)}/mae_checkpoints/mae_pretrain_vit_large_full.pth")["model"]
+        mae = mae_vit_large_patch16(norm_pix_loss=args.norm_pix_loss)
+    else:
+        raise NotImplementedError()
+    mae.load_state_dict(mae_model_state)
+    model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
+
+    if args.script == "imle-mask-tokens":
+        model = MaskedIPViTSampledMaskToken(**model_kwargs)
+    elif args.script == "imle-encoder-block-outputs" or args.script == "mae":
+        model = MaskedIPViT(parse_ip_spec(args), **model_kwargs)
+    else:
+        raise NotImplementedError()
+    
+    model = model.to(torch.float32)
+    return model
+
 def mae_vit_base_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(
         patch_size=16, embed_dim=768, depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
-
 
 def mae_vit_large_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(
@@ -894,19 +747,12 @@ def mae_vit_large_patch16_dec512d8b(**kwargs):
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
-
 def mae_vit_huge_patch14_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(
         patch_size=14, embed_dim=1280, depth=32, num_heads=16,
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
-
-def arch_to_model(args):
-    """
-    """
-    if args.arch == "base_patch16":
-        return mae_vit_base_patch16
 
 # set recommended archs
 mae_vit_base_patch16 = mae_vit_base_patch16_dec512d8b  # decoder: 512 dim, 8 blocks

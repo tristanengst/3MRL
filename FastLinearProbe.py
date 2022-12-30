@@ -93,16 +93,13 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None, verbose=True
 
     if isinstance(model, MaskedIPViT):
         backbone = IPViTBackbone(encoder_kwargs=model.encoder_kwargs,
-            idx2v_method=model.idx2v_method,
+            idx2ip_method=model.idx2ip_method,
             global_pool=args.global_pool,
             noise=args.noise)
 
         interpolate_pos_embed(backbone, model.state_dict())
         _ = backbone.load_state_dict(model.state_dict(), strict=False)
         backbone = backbone.to(device)
-        backbone.set_latent_spec(mask_ratio=0,
-            test_input=torch.ones(4, 3, args.input_size, args. input_size,
-            device=device))
     else:
         backbone = model
 
@@ -110,14 +107,14 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None, verbose=True
 
     # Get the data
     if classes is None:
-        classes = Misc.sample(data_tr.classes, k=args.val_n_way, seed=args.seed)
+        classes = Misc.sample(data_tr.classes, k=args.probe_n_way, seed=args.seed)
 
     data_tr = get_fewshot_dataset(data_tr,
-        n_shot=args.val_n_shot,
+        n_shot=args.probe_n_shot,
         classes=classes,
         seed=args.seed)
     data_val = get_fewshot_dataset(data_val,
-        n_shot="all",
+        n_shot=-1,
         classes=classes,
         seed=args.seed)
 
@@ -210,9 +207,9 @@ def get_args(args=None):
     P.add_argument("--input_size", default=224, type=int,
         help="Size of (cropped) images to feed to the model")
 
-    P.add_argument("--val_n_way", type=int, default=10,
+    P.add_argument("--probe_n_way", type=int, default=10,
         help="Number of classes in probe/finetune data")
-    P.add_argument("--val_n_shot", type=int, default=1000,
+    P.add_argument("--probe_n_shot", type=int, default=1000,
         help="Number of examples per class in probe/finetune data")
 
     P.add_argument("--global_pool", type=int, default=1, choices=[0, 1],

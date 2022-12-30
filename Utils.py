@@ -39,53 +39,6 @@ def de_dataparallel(net):
     """
     return net.module if isinstance(net, nn.DataParallel) else net
 
-def sample_latent_dict(d, bs=1, device=device, noise="gaussian", args=None):
-    """Returns dictionary [d] after mapping all its values that are tuples of
-    integers to Gaussian noise tensors with shapes given by the tuples.
-
-    The noise and batch size specified as function parameters are default.
-    However, they can be overridden on a per-key basis if needed. Example:
-    ```
-    {key: (1701,), key_bs: 42, key_noise_type: "zeros"}
-    ```
-
-    Args:
-    d       -- a mapping from strings to dimensions, possibly with other
-                key-value pairs
-    bs      -- the batch size to use for each tensor if 'k_bs' isn't in [d]
-    device  -- the device to return all tensors on
-    noise   -- noise type that overrides args.noise
-    args    -- Namespace with --noise (default noise that can be overrriden),
-                --fix_mask_noise and --seed parameters
-    """
-    def get_sample(key, dims):
-        if dims is None:
-            dims = ()
-
-        default_noise = args.noise if noise is None else noise
-        noise_ = d[f"{key}_noise_type"] if f"{key}_noise_type" in d else default_noise
-        bs_ = d[f"{key}_bs"] if f"{key}_bs" in d else bs
-
-        # Sometimes for the masks we want to fix the latent seed
-        if "mask" in key and not args is None and args.fix_mask_noise:
-            gen = torch.Generator(device=device).manual_seed(args.seed)
-        else:
-            gen = None
-
-        if noise_ == "gaussian":
-            return torch.ones(*((bs_,) + dims), device=device).normal_(generator=gen)
-        elif noise_ == "ones":
-            return torch.ones(*((bs_,) + dims), device=device)
-        elif noise_ == "zeros":
-            return torch.zeros(*((bs_,) + dims), device=device)
-        elif noise_ == "uniform":
-            return torch.ones(*((bs_,) + dims), device=device).uniform_(generator=gen)            
-        else:
-            raise NotImplementedError(f"Unknown noise '{noise_}'")
-
-    return {k: get_sample(k, v) for k,v in d.items()
-        if not k.endswith("_noise_type") and not k.endswith("_bs")}
-
 def images_to_pil_image(images):
     """Returns tensor datastructure [images] as a PIL image."""
     images = Misc.make_2d_list_of_tensor(images)
