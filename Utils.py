@@ -1,21 +1,22 @@
 import argparse
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from copy import deepcopy
 import io
 import json
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
+import random
 import torch
 import torch.nn as nn
 from torchvision.transforms import functional as tv_functional
 import wandb
 
+import Misc
 
 from tqdm import tqdm
 
-# from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
-import Misc
+import Utils
 
 # I don't think this does anything because we don't have convolutions, but it
 # probably can't hurt
@@ -60,6 +61,16 @@ def images_to_pil_image(images):
     plt.close("all")
     return Image.open(buf)
 
+def flatten(xs):
+    """Returns collection [xs] after recursively flattening into a list."""
+    if isinstance(xs, list) or isinstance(xs, set) or isinstance(xs, tuple):
+        result = []
+        for x in xs:
+            result += flatten(x)
+        return result
+    else:
+        return [xs]
+
 def scheduler_to_lrs(s):
     """Returns a mapping from parameter group names to their current learning
     rate for scheduler [s]. If the parameter group is unnamed, 
@@ -88,7 +99,7 @@ class KOrKMinusOne:
         self.seed = seed
 
         if shuffle:
-            self.idxs = Misc.sample(idxs, k=len(idxs), seed=seed)
+            self.idxs = sample(idxs, k=len(idxs), seed=seed)
         else:
             self.idxs = idxs
 
@@ -97,7 +108,7 @@ class KOrKMinusOne:
             self.counter = 0
             self.num_resets += 1
             if self.shuffle:
-                self.idxs = Misc.sample(self.idxs,
+                self.idxs = sample(self.idxs,
                     k=len(self.idxs),
                     seed=self.seed + self.num_resets)
             else:
@@ -119,261 +130,140 @@ class KOrKMinusOne:
         kkm.__dict__.update(state_dict)
         return kkm
 
-import math
-import torch
-from torch.optim.lr_scheduler import _LRScheduler
+def set_seed(seed):
+    """Seeds the program to use seed [seed]."""
+    if isinstance(seed, int):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        tqdm.write(f"Set the NumPy, PyTorch, and Random modules seeds to {seed}")
+    elif isinstance(seed, dict):
+        random.setstate(seed["random_seed"])
+        np.random.set_state(seed["numpy_seed"])
+        torch.set_rng_state(seed["torch_seed"])
+        torch.cuda.set_rng_state(seed["torch_cuda_seed"])
+        tqdm.write(f"Reseeded program with old seed")
+    else:
+        raise ValueError(f"Seed should be int or contain resuming keys")
+    return seed
 
-class NoChangeScheduler(_LRScheduler):
-    """Scheduler that does not change learning rate.
-    
-    This scheduler will be the only thing to control the learning rate when in
-    use, and the learning rate in the optimizer is ignored. This is a much more
-    convenient API than allowing the optimizer to control the learning rate.
+def sorted_namespace(args):
+    """Returns argparse Namespace [args] after sorting the args in it by key
+    value. The utility of this is printing.
     """
-    def __init__(self, optimizer, last_epoch=-1):
-        self.global_step = last_epoch
-        super(NoChangeScheduler, self).__init__(optimizer,
-            last_epoch=last_epoch)
+    d = vars(args)
+    return argparse.Namespace(**{k: d[k] for k in sorted(d.keys())})
+
+def conditional_make_folder(f):
+    try:
+        os.makedirs(f)
+    except:
+        pass
+
+def sample(select_from, k=-1, seed=0):
+    """Returns [k] items sampled without replacement from [select_from] with
+    seed [seed], without changing the internal seed of the program. This
+    explicitly ensures reproducability.
+    """
+    state = random.getstate()
+    random.seed(seed)
+    try:
+        result = random.sample(select_from, k=k)
+    except ValueError as e:
+        tqdm.write(f"Tried to sample {k} from {len(select_from)} things")
+        raise e
+    random.setstate(state)
+    return result
+
+def split_by_param_names(model, *param_names):
+    name2params = {p: [] for p in param_names} | {"default": []}
+    for k,v in model.named_parameters():
+        found_custom_name = False
+        for p in param_names:
+            if p in k:
+                name2params[p].append(v)
+                found_custom_name = True
+                break
+        if not found_custom_name:
+            name2params["default"].append(v)
+
+    return [{"params": p, "name": n} for n,p in name2params.items()]
+
+class StepScheduler:
+    """StepLR but with easier control.
     
-    def get_lr(self): return {pg["name"]: pg["lr"] for pg in self.optimizer.param_groups}
-
-    def __str__(self): return f"{self.__class__.__name__} [{self.get_lr()}]"
-
-    def step(self): self.global_step += 1
-
-
-class LinearRampScheduler(_LRScheduler):
-    """Scheduler giving a linear ramp followed by a constant learning rate.
-
-    This scheduler will be the only thing to control the learning rate when in
-    use, and the learning rate in the optimizer is ignored. This is a much more
-    convenient API than allowing the optimizer to control the learning rate.
-
     Args:
-    optimizer       -- wrapped optimizer
-    warmup_steps    -- number of warmup steps for all parameters
-    last_epoch      -- last epoch (step)
-    min_lr          -- minimum learning rate for all parameters
-    pg2base_lrs     -- dictionary mapping param group names in [optimizer] to
-                        their post-ramp learning rates. If a float, the same
-                        value is used for all parameters.
-    pg2start_step   -- dictionary mapping each param group to the epoch on which
-                        its learning rate can start being non-zero
+    optimizer   -- optimizer to step
+    lrs         -- list where sequential pairs of elements describe a step index
+                    and the learning rate for that step and subsequent steps
+                    until a new learning rate is specified
+    last_epoch  -- the last run step
+    named_lr_muls -- dictionary mapping names to multipliers on learning
+                            rates specified in lrs. This is a simple and convenient way to have different learning rates for different layers
     """
-    def __init__(self, optimizer, warmup_steps=0, last_epoch=-1, min_lr=0,
-        pg2base_lrs=1e-3, pg2start_step=None, verbose=True):
+    def __init__(self, optimizer, lrs, last_epoch=-1, named_lr_muls={}):
+        super(StepScheduler, self).__init__()
+        self.optimizer = optimizer
+        self.named_lr_muls = named_lr_muls
+        
+        # Get a mapping from epoch indices to the learning rates they should if
+        # the learning rate should change at the start of the epoch
+        keys = [lrs[idx] for idx in range(0, len(lrs) -1, 2)]
+        vals = [lrs[idx] for idx in range(1, len(lrs), 2)]
+        self.schedule = OrderedDict(list(zip(keys, vals)))
 
-        if warmup_steps == 0:
-            raise ValueError(f"LinearRampScheduler requires 'warmup_steps' > 0")
-        self.global_step = last_epoch
-        self.min_lr = min_lr
-        self.warmup_steps = warmup_steps
+        # Create a dictionary that implements (a) a fast mapping from steps to
+        # the learning rate they should have, and (b) support for infinite steps
+        # using the last learning rate
+        self.step2lr = defaultdict(lambda: self.schedule[max(self.schedule.keys())])
+        self.step2lr[-1] = self.schedule[0]
+        cur_lr = self.schedule[0]
+        for s in range(max(self.schedule.keys())):
+            if s in self.schedule:
+                cur_lr = self.schedule[s]
+            self.step2lr[s] = cur_lr
 
-        # Index of step on which a parameter group can start having a non-zero
-        # learning
-        if pg2start_step is None:
-            self.pg2start_step = {p["name"]: 0 for p in optimizer.param_groups}
-        else:
-            self.pg2start_step = pg2start_step
+        self.cur_step = last_epoch    
+        self.step()
+    
+    def __str__(self): return f"{self.__class__.__name__} [schedule={dict(self.schedule)} cur_step={self.cur_step} lr={self.get_lr()}]"
 
-        # Number of steps for each parameter group so far
-        if last_epoch == -1:
-            self.pg2step = {pg["name"]: 1 for pg in optimizer.param_groups}
-        else:
-            self.pg2step = {pg["name"]: max(1, (last_epoch - pg2start_step[pg["name"]]))
-                for pg in optimizer.param_groups}
+    def get_lr(self): return self.step2lr[self.cur_step]
+        
+    def step(self, cur_step=None):
+        cur_step = self.cur_step if cur_step is None else cur_step
 
-
-        # Amount to increase the learning rate of each parameter group per step
-        # during its ramp
-        if isinstance(pg2base_lrs, float):
-            self.lr_inc_per_step = {pg["name"]: pg2base_lrs - min_lr
-                for pg in optimizer.param_groups}
-        elif isinstance(pg2base_lrs, dict):
-            self.lr_inc_per_step = {pg["name"]: pg2base_lrs[pg["name"]] - min_lr
-                for pg in optimizer.param_groups}
-        else:
-            raise NotImplementedError()
-
-        self.lr_inc_per_step = {pgn: inc / warmup_steps
-            for pgn,inc in self.lr_inc_per_step.items()}
-
-        super(LinearRampScheduler, self).__init__(optimizer,
-            last_epoch=-1, # Prevent the base class from being weird
-            verbose=verbose)
-
-    def get_lr(self): return {pg["name"]: pg["lr"] for pg in self.optimizer.param_groups}
-
-    def step(self):
         for pg in self.optimizer.param_groups:
-            if self.global_step < self.pg2start_step[pg["name"]]:     
-                pg["lr"] = 0
-            else:
-                if self.pg2step[pg["name"]] <= self.warmup_steps:
-                    pg["lr"] = self.pg2step[pg["name"]] * self.lr_inc_per_step[pg["name"]] + self.min_lr
-                    self.pg2step[pg["name"]] += 1
-                else:
-                    self.pg2step[pg["name"]] += 1
+            pg["lr"] = self.step2lr[cur_step]
 
-        self.global_step += 1
+            if "name" in pg and pg["name"] in self.named_lr_muls:
+                pg["lr"] = pg["lr"] * self.named_lr_muls[pg["name"]]
 
-    def __str__(self): return f"LinearRampScheduler [global_step {self.global_step} | min_lr {self.min_lr} | warmup_steps {self.warmup_steps}\n\tpg2step {self.pg2step} | pg2start_step {self.pg2start_step}\n\tlr_inc_per_step {self.lr_inc_per_step}\n\tlrs {self.get_lr()}]"
+        self.cur_step = cur_step + 1
 
-class LinearRampCosineDecayScheduler(_LRScheduler):
+    @staticmethod
+    def process_lrs(lrs):
+        """Returns a list where even elements give a step index and are integers
+        and odd elements give the float learning rate starting at the prior even
+        element step.
 
-    def __init__(self, optimizer, warmup_steps=0, total_steps=1, last_epoch=-1, min_lr=0,
-        pg2base_lrs=1e-3, pg2start_step=None, verbose=True):
+        This is intended to be run on the initial float-valied LRS attribute
+        collected through argparse, and will raise argparse errors if the LRS
+        specification is bad.
+        """
+        lrs = [float(l) for l in lrs]
+        def is_increasing(l): return sorted(l) == l and len(l) == len(set(l))
 
-        if warmup_steps == 0:
-            raise ValueError(f"LinearRampCosineDecayScheduler requires 'warmup_steps' > 0")
-        self.global_step = last_epoch
-        self.min_lr = min_lr
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-
-        # Index of step on which a parameter group can start having a non-zero
-        # learning
-        if pg2start_step is None:
-            self.pg2start_step = {p["name"]: 0 for p in optimizer.param_groups}
+        if not len(lrs) % 2 == 0:
+            raise argparse.ArgumentTypeError(f"--lrs must have an even number of values")
+        if not is_increasing([l for idx,l in enumerate(lrs) if idx % 2 == 0]):
+            raise argparse.ArgumentTypeError(f"--lrs must have strictly increasing keys (even values)")
+        if not lrs[0] == int(0):
+            raise argparse.ArgumentTypeError(f"--lrs should begin with 0")
         else:
-            self.pg2start_step = pg2start_step
-
-        # Number of steps for each parameter group so far
-        if last_epoch == -1:
-            self.pg2step = {pg["name"]: 1 for pg in optimizer.param_groups}
-        else:
-            self.pg2step = {pg["name"]: max(1, (last_epoch - pg2start_step[pg["name"]]))
-                for pg in optimizer.param_groups}
-
-        # Set base learning rates
-        if isinstance(pg2base_lrs, float):
-            self.pg2base_lrs = {pg["name"]: pg2base_lrs for pg in optimizer.param_groups}
-        else:
-            self.pg2base_lrs = pg2base_lrs
-
-        # Amount to increase the learning rate of each parameter group per step
-        # during its ramp
-        if isinstance(pg2base_lrs, float):
-            self.lr_inc_per_step = {pg["name"]: pg2base_lrs - min_lr
-                for pg in optimizer.param_groups}
-        elif isinstance(pg2base_lrs, dict):
-            self.lr_inc_per_step = {pg["name"]: pg2base_lrs[pg["name"]] - min_lr
-                for pg in optimizer.param_groups}
-        else:
-            raise NotImplementedError()
-
-        self.lr_inc_per_step = {pgn: inc / warmup_steps
-            for pgn,inc in self.lr_inc_per_step.items()}
-
-        super(LinearRampCosineDecayScheduler, self).__init__(optimizer,
-            last_epoch=-1, # Prevent the base class from being weird
-            verbose=verbose)
-
-    def get_lr(self): return {pg["name"]: pg["lr"] for pg in self.optimizer.param_groups}
-
-    def step(self):
-        for pg in self.optimizer.param_groups:
-            if self.global_step < self.pg2start_step[pg["name"]]:     
-                pg["lr"] = 0
-            else:
-                if self.pg2step[pg["name"]] <= self.warmup_steps:
-                    pg["lr"] = self.pg2step[pg["name"]] * self.lr_inc_per_step[pg["name"]] + self.min_lr
-                    self.pg2step[pg["name"]] += 1
-                else:
-                    cosine_step_idx =  self.pg2step[pg["name"]] + self.pg2start_step[pg["name"]]
-                    cosine_scaling = .5 + .5 * math.cos(math.pi * cosine_step_idx / self.total_steps)
-                    pg["lr"] = cosine_scaling * self.pg2base_lrs[pg["name"]]
-                    self.pg2step[pg["name"]] += 1
-
-        self.global_step += 1
-
-    def __str__(self): return f"{self.__class__.__name__} [global_step={self.global_step} min_lr={self.min_lr} warmup_steps={self.warmup_steps}\n\tpg2step={self.pg2step} pg2start_step={self.pg2start_step}\n\tlr_inc_per_step={self.lr_inc_per_step}\n\tbase_lrs{self.pg2base_lrs} lrs={self.get_lr()}]"
-
-
-class CosineAnnealingWarmupRestarts(_LRScheduler):
-    """
-        optimizer (Optimizer): Wrapped optimizer.
-        first_cycle_steps (int): First cycle step size.
-        cycle_mult(float): Cycle steps magnification. Default: -1.
-        max_lr(float): First cycle's max learning rate. Default: 0.1.
-        min_lr(float): Min learning rate. Default: 0.001.
-        warmup_steps(int): Linear warmup step size. Default: 0.
-        gamma(float): Decrease rate of max learning rate by cycle. Default: 1.
-        last_epoch (int): The index of last epoch. Default: -1.
-    """
-    
-    def __init__(self,
-                 optimizer : torch.optim.Optimizer,
-                 first_cycle_steps : int,
-                 cycle_mult : float = 1.,
-                 max_lr : float = 0.1,
-                 min_lr : float = 0.001,
-                 warmup_steps : int = 0,
-                 gamma : float = 1.,
-                 last_epoch : int = -1
-        ):
-        assert warmup_steps < first_cycle_steps
-        
-        self.first_cycle_steps = first_cycle_steps # first cycle step size
-        self.cycle_mult = cycle_mult # cycle steps magnification
-        self.base_max_lr = max_lr # first max learning rate
-        self.max_lr = max_lr # max learning rate in the current cycle
-        self.min_lr = min_lr # min learning rate
-        self.warmup_steps = warmup_steps # warmup step size
-        self.gamma = gamma # decrease rate of max learning rate by cycle
-        
-        self.cur_cycle_steps = first_cycle_steps # first cycle step size
-        self.cycle = 0 # cycle count
-        self.step_in_cycle = last_epoch # step size of the current cycle
-        
-        super(CosineAnnealingWarmupRestarts, self).__init__(optimizer, last_epoch)
-        
-        # set learning rate min_lr
-        self.init_lr()
-    
-    def init_lr(self):
-        self.base_lrs = []
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self.min_lr
-            self.base_lrs.append(self.min_lr)
-    
-    def get_lr(self):
-        if self.step_in_cycle == -1:
-            return self.base_lrs
-        elif self.step_in_cycle < self.warmup_steps:
-            return [(self.max_lr - base_lr)*self.step_in_cycle / self.warmup_steps + base_lr for base_lr in self.base_lrs]
-        else:
-            return [base_lr + (self.max_lr - base_lr) \
-                    * (1 + math.cos(math.pi * (self.step_in_cycle-self.warmup_steps) \
-                                    / (self.cur_cycle_steps - self.warmup_steps))) / 2
-                    for base_lr in self.base_lrs]
-
-    def step(self, epoch=None):
-        if epoch is None:
-            epoch = self.last_epoch + 1
-            self.step_in_cycle = self.step_in_cycle + 1
-            if self.step_in_cycle >= self.cur_cycle_steps:
-                self.cycle += 1
-                self.step_in_cycle = self.step_in_cycle - self.cur_cycle_steps
-                self.cur_cycle_steps = int((self.cur_cycle_steps - self.warmup_steps) * self.cycle_mult) + self.warmup_steps
-        else:
-            if epoch >= self.first_cycle_steps:
-                if self.cycle_mult == 1.:
-                    self.step_in_cycle = epoch % self.first_cycle_steps
-                    self.cycle = epoch // self.first_cycle_steps
-                else:
-                    n = int(math.log((epoch / self.first_cycle_steps * (self.cycle_mult - 1) + 1), self.cycle_mult))
-                    self.cycle = n
-                    self.step_in_cycle = epoch - int(self.first_cycle_steps * (self.cycle_mult ** n - 1) / (self.cycle_mult - 1))
-                    self.cur_cycle_steps = self.first_cycle_steps * self.cycle_mult ** (n)
-            else:
-                self.cur_cycle_steps = self.first_cycle_steps
-                self.step_in_cycle = epoch
-                
-        self.max_lr = self.base_max_lr * (self.gamma**self.cycle)
-        self.last_epoch = math.floor(epoch)
-        for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
-            param_group['lr'] = lr
+            return [int(l) if idx % 2 == 0 else float(l)
+                for idx,l in enumerate(lrs)]
 
 
 

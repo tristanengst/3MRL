@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader, Subset, Dataset
 from original_code.models_mae import mae_vit_base_patch16 as foo
 
 from Augmentation import *
-import Misc
 from Data import *
 from FastLinearProbe import fast_linear_probe
 from IO import *
@@ -45,12 +44,13 @@ def model_folder(args, make_folder=False):
     data = os.path.basename(os.path.dirname(args.data_tr.strip("/"))).strip("/")
     ip_spec = "_".join(args.ip_spec)
     job_id = "" if args.job_id is None else f"-{args.job_id}"
+    lrs = "_".join([f"{lr:.2e}" for idx,lr in enumerate(args.lrs) if idx % 2 == 1])
     
-    folder = f"{args.save_folder}/models/{args.script}-{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{args.lr:.2e}-ns{args.ns}-scheduler{args.scheduler}-ipspec{ip_spec}-{args.uid}{job_id}{Misc.suffix_str(args)}"
+    suffix_str = f"-{args.suffix}" if not args.suffix is None else ""
+    folder = f"{args.save_folder}/models/{args.script}-{data}-bs{args.ex_per_epoch}-epochs{args.epochs}-ipe{args.ipe}-lr{lrs}-ns{args.ns}-ipspec{ip_spec}-{args.uid}{job_id}{suffix_str}"
 
     if make_folder:
-        Misc.conditional_safe_make_directory(folder)
-        Misc.dict_to_json(vars(args), f"{folder}/config.json")
+        Utils.conditional_make_folder(folder)
 
     return folder
 
@@ -260,7 +260,7 @@ def validate(model, data_tr, data_val, args, ignore_z=False):
     else:
         probe_acc = -1
 
-    idxs_te = Misc.sample(range(len(data_val)),
+    idxs_te = Utils.sample(range(len(data_val)),
         k=min(args.ex_for_mse_loss, len(data_val)),
         seed=args.seed)
     gen_loss_te = get_reconstruction_images_loss(model,
@@ -270,7 +270,7 @@ def validate(model, data_tr, data_val, args, ignore_z=False):
         codes_per_ex=args.z_per_ex_loss,
         val_ignore_z=val_ignore_z)
 
-    idxs_tr = Misc.sample(range(len(data_tr)),
+    idxs_tr = Utils.sample(range(len(data_tr)),
         k=min(args.ex_for_vis_tr, len(data_tr)),
         seed=args.seed)
     _, images_tr = get_reconstruction_images_loss(model,
@@ -280,7 +280,7 @@ def validate(model, data_tr, data_val, args, ignore_z=False):
         codes_per_ex=args.z_per_ex_vis,
         val_ignore_z=val_ignore_z)
     
-    idxs_te = Misc.sample(range(len(data_val)),
+    idxs_te = Utils.sample(range(len(data_val)),
         k=min(args.ex_for_vis_te, len(data_val)),
         seed=args.seed)
     _, images_te = get_reconstruction_images_loss(model,
@@ -307,21 +307,7 @@ def get_model_optimizer(args, resume_optimizer=False):
         model.load_state_dict(old_state)
 
     model = nn.DataParallel(model, device_ids=args.gpus).to(device)
-
-    params_z = [v for p,v in model.named_parameters()
-            if "ip_method" in p]
-    params_mae = [v for p,v in model.named_parameters()
-            if not "ip_method" in p]
-    optimizer = AdamW([{"params": params_z,
-        "lr": args.lr_z,
-        "initial_lr": 0,
-        "name": "params_z"},
-        {"params": params_mae,
-        "lr": args.lr,
-        "initial_lr": 0,
-        "name": "params_mae"}],
-        betas=(args.beta1, args.beta2),
-        weight_decay=args.wd)
+    optimizer = AdamW(model.parameters(), lr=args.lrs[1], weight_decay=args.wd)
     
     if args.resume is not None and resume_optimizer:
         optimizer.load_state_dict(resume["optimizer"])
@@ -340,7 +326,7 @@ def print_and_log_results(results, args, epoch=0, cur_step=0, baseline=False):
     baseline    -- whether the results being logged contain only baselines
     """
     save_dir = model_folder(args)
-    Misc.conditional_safe_make_directory(f"{save_dir}/images")
+    Utils.conditional_make_folder(f"{save_dir}/images")
     cur_step = max(epoch * args.ipe, cur_step)
 
     # Save images and store them in a dictionary that will be logged later.
@@ -348,14 +334,14 @@ def print_and_log_results(results, args, epoch=0, cur_step=0, baseline=False):
     log_images = {}
     for k,v in images.items():
         if "baseline" in k and baseline:
-            file_name = k.replace("images/", f"images/baseline_")
-            v.save(f"{save_dir}/{file_name}.png")
+            # file_name = k.replace("images/", f"images/baseline_")
+            # v.save(f"{save_dir}/{file_name}.png")
             log_images[k] = wandb.Image(v)
         elif "baseline" in k and not baseline:
             continue # This image has already been saved and logged
         else:
             file_name = k.replace("images/", f"images/{epoch+1}_{cur_step % args.ipe}")
-            v.save(f"{save_dir}/{file_name}.png")
+            # v.save(f"{save_dir}/{file_name}.png")
             log_images[k] = wandb.Image(v)
 
     # Log the non-image results and the images that were saved earlier. Baseline
@@ -405,9 +391,6 @@ def get_args(args=None):
         tqdm.write(f"Setting PROBE_N_SHOT to {args.train_n_shot} to match TRAIN_N_SHOT")
         args.probe_n_shot = args.train_n_shot
 
-    if args.scheduler == "constant" and not args.n_ramp == 0:
-        raise ValueError(f"Can not ramp constant scheduler. Set --n_ramp to zero")
-
     if len(args.ip_spec) == 0:
         tqdm.write(f"WARNING: empty --ip_spec precludes model from returning multiple outputs for one input. Consider adding a variational block with --noise set to 'zeros'")
         
@@ -418,22 +401,20 @@ def get_args(args=None):
     if args.ex_per_epoch // args.mini_bs > args.ipe:
         raise ValueError(f"Request at least --ex_per_epoch // --mini_bs iterations for --ipe")
 
-    if args.lr_z == -1:
-        args.lr_z = args.lr
-
     if args.script is None:
         args.script = "mae" if args.ignore_z else "mae-imle"
     else:
         if args.ignore_z and "imle" in args.script:
             raise ValueError(f"Should not run with --ignore_z set and 'imle' in the script.")
 
+    args.lrs = Utils.StepScheduler.process_lrs(args.lrs)
+    args.probe_lrs = Utils.StepScheduler.process_lrs(args.probe_lrs)
+
     return args
-
-
 
 if __name__ == "__main__":
     args = get_args()
-    Misc.set_seed(args.seed)
+    Utils.set_seed(args.seed)
 
     ############################################################################
     # Load resumed things or instantiate them. If resuming and the resumed
@@ -465,15 +446,9 @@ if __name__ == "__main__":
             args.__dict__.update(vars(old_args) | keep_args)
 
             model, optimizer = get_model_optimizer(args, resume_optimizer=True)
-            wandb.init(id=args.uid, resume="must", mode=args.wandb,
-                project="3MRL", config=args,
-                name=os.path.basename(model_folder(args)))
         else:
             args.arch = old_args.arch
             model, optimizer = get_model_optimizer(args, resume_optimizer=False)
-            wandb.init(anonymous="allow", id=args.uid, config=args,
-                mode=args.wandb, project="3MRL",
-                name=os.path.basename(model_folder(args)))
 
         kkm = KOrKMinusOne.from_state_dict(resume["kkm"])
         last_epoch = resume["last_epoch"]
@@ -481,7 +456,7 @@ if __name__ == "__main__":
 
         baseline = resume["baseline"] if "baseline" in resume else dict()
         
-    Misc.pretty_print_args(args)
+    tqdm.write(f"{Utils.sorted_namespace(args)}")
     tqdm.write(f"LOG: Will save to {model_folder(args)}")
     
     ############################################################################
@@ -515,31 +490,16 @@ if __name__ == "__main__":
     tqdm.write(f"VALIDATION DATA\n{data_val}")
     tqdm.write(f"KKM\n{kkm}")
         
-    ############################################################################
-    # Get the scheduler
-    ############################################################################    
-    if args.scheduler == "linear_ramp_cosine_decay":
-        scheduler = LinearRampCosineDecayScheduler(optimizer,
-            total_steps=args.epochs * args.ipe,
-            warmup_steps=args.n_ramp * args.ipe,
-            pg2base_lrs={"params_mae": args.lr, "params_z": args.lr_z},
-            pg2start_step={"params_mae": args.headstart_z * args.ipe, "params_z": 0},
-            min_lr=args.min_lr,
-            last_epoch=last_step)
-    elif args.scheduler == "linear_ramp":
-        scheduler = LinearRampScheduler(optimizer,
-            warmup_steps=args.n_ramp * args.ipe,
-            min_lr=args.min_lr,
-            pg2base_lrs={"params_mae": args.lr, "params_z": args.lr_z},
-            pg2start_step={"params_mae": args.headstart_z * args.ipe, "params_z": 0},
-            last_epoch=last_step)
-    elif args.scheduler == "constant":
-        scheduler = NoChangeScheduler(optimizer, last_epoch=last_epoch)
-    elif args.scheduler == "step":
-        scheduler = Misc.StepScheduler(optimizer, args=args, last_epoch=last_epoch)
-    else:
-        raise NotImplementedError()
+    scheduler = Utils.StepScheduler(optimizer, args.lrs,
+        last_epoch=last_epoch,
+        named_lr_muls={"mapping_net": 1 if args.mapping_net_eqlr else args.mapping_net_lrmul})
     tqdm.write(f"SCHEDULER\n{scheduler}")
+
+    wandb.init(anonymous="allow", id=args.uid, config=args,
+        mode=args.wandb, project="3MRL", entity="apex-lab",
+        name=os.path.basename(model_folder(args)),
+        resume="allow" if args.continue_run else "never",
+        settings=wandb.Settings(code_dir=os.path.dirname(__file__)))
 
     ############################################################################
     # If desired, evaluate with plain MAE. This is important as it gives the
@@ -625,15 +585,13 @@ if __name__ == "__main__":
             cur_step = epoch * args.ipe + batch_idx
             if cur_step % log_iter == 0 or batch_idx == gradient_steps - 1:
                 data_to_log = {"pretrain/loss_tr": loss.item()}
-                data_to_log |= {f"pretrain/lr_{g}": lr
-                    for g,lr in scheduler_to_lrs(scheduler).items()}
+                data_to_log |= {f"pretrain/lr": scheduler.get_lr()}
                 print_and_log_results(data_to_log | baseline, args,
                     epoch=epoch,
                     cur_step=cur_step)
 
         data_to_log = {"pretrain/loss_tr": loss.item()}
-        data_to_log |= {f"pretrain/lr_{g}": lr
-            for g,lr in scheduler_to_lrs(scheduler).items()}
+        data_to_log |= {f"pretrain/lr": scheduler.get_lr()}
         data_to_log |= validate(model=model,
             data_tr=data_tr,
             data_val=data_val,

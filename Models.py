@@ -31,9 +31,9 @@ def parse_ip_spec(args):
             return s
         elif s.startswith("adain"):
             if "base" in args.arch:
-                return AdaIN(c=768, act_type=args.act_type)
+                return AdaIN(args, c=768)
             elif "large" in args.arch:
-                return AdaIN(c=1024, act_type=args.act_type)
+                return AdaIN(args, c=768)
             else:
                 raise NotImplementedError()
         elif s.startswith("local_adain"):
@@ -723,12 +723,7 @@ def get_masked_ipvit_model(args):
     mae.load_state_dict(mae_model_state)
     model_kwargs = {"mae_model": mae} if args.finetune else mae.kwargs
 
-    if args.script == "imle-mask-tokens":
-        model = MaskedIPViTSampledMaskToken(**model_kwargs)
-    elif args.script == "imle-encoder-block-outputs" or args.script == "mae":
-        model = MaskedIPViT(parse_ip_spec(args), **model_kwargs)
-    else:
-        raise NotImplementedError()
+    model = MaskedIPViT(parse_ip_spec(args), **model_kwargs)
     
     model = model.to(torch.float32)
     return model

@@ -15,6 +15,7 @@ from Augmentation import *
 from Data import *
 from Models import *
 from Utils import *
+import Utils
 
 def accuracy(model, loader):
     """Returns the accuracy of [model] on data in [loader]."""
@@ -107,7 +108,7 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None, verbose=True
 
     # Get the data
     if classes is None:
-        classes = Misc.sample(data_tr.classes, k=args.probe_n_way, seed=args.seed)
+        classes = Utils.sample(data_tr.classes, k=args.probe_n_way, seed=args.seed)
 
     data_tr = get_fewshot_dataset(data_tr,
         n_shot=args.probe_n_shot,
@@ -147,14 +148,11 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None, verbose=True
     probe = nn.Linear(data_tr[0][0].shape[0], len(classes))
     probe = nn.DataParallel(probe, device_ids=args.gpus).to(device)
     optimizer = torch.optim.AdamW(probe.parameters(),
-        lr=args.probe_lr,
+        lr=args.probe_lrs[1],
         weight_decay=1e-6)
     loss_fn = nn.CrossEntropyLoss().to(device)
     scaler = torch.cuda.amp.GradScaler()
-    scheduler = CosineAnnealingWarmupRestarts(optimizer,
-        first_cycle_steps=args.probe_epochs * len(loader_tr),
-        warmup_steps=max(1, args.probe_epochs // 10) * len(loader_tr),
-        min_lr=1e-6)
+    scheduler = Utils.StepScheduler(optimizer, args.probe_lrs)
 
     # Train the probe
     for e in tqdm(range(args.probe_epochs),
@@ -179,13 +177,13 @@ def fast_linear_probe(model, data_tr, data_val, args, classes=None, verbose=True
             scaler.step(optimizer)
             optimizer.zero_grad(set_to_none=True)
             scaler.update()
-            scheduler.step()
+        scheduler.step()
 
         if (args.probe_eval_iter > 0
             and ((e % args.probe_eval_iter == 0 and e > 0)
             or (e == 0 and args.probe_eval_iter == 1)
             or e == args.probe_epochs - 1)):
-            tqdm.write(f"LOG: Fast Linear Probe: Epoch {e} | fast_linear_probe/lr {scheduler.get_lr()[0]:.5e} | fast_linear_probe/loss_tr {loss.item():.5f} | fast_linear_probe/acc_te {accuracy(probe, loader_val):.5f}") 
+            tqdm.write(f"LOG: Fast Linear Probe: Epoch {e} | fast_linear_probe/lr {scheduler.get_lr():.5e} | fast_linear_probe/loss_tr {loss.item():.5f} | fast_linear_probe/acc_te {accuracy(probe, loader_val):.5f}") 
     
     model = model.to(device)
     return accuracy(probe, loader_val)

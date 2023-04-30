@@ -17,7 +17,7 @@ def argparse_file_type(x):
 
 def add_util_args(P):
     P.add_argument("--wandb", choices=["disabled", "online", "offline"], 
-        default="online",
+        default="disabled",
         help="Type of W&B logging")
     P.add_argument("--save_folder", default=".",
         help="Folder inside which to save the enclosing folder for the results")
@@ -31,6 +31,8 @@ def add_util_args(P):
         help="SLURM job_id if available")
     P.add_argument("--script", default=None,
         help="Script being run, interpreted loosely to denote MAE or IMLE") 
+    P.add_argument("--continue_run", default=1, choices=[0, 1], type=int,
+        help="Whether to use data augmentation")
     return P
 
 def add_train_imle_debugging_args(P):
@@ -119,31 +121,36 @@ def add_train_imle_args(P):
         help="Size of (cropped) images to feed to the model")
     P.add_argument("--noise", default="gaussian", choices=["gaussian", "zeros"],
         help="Kind of noise to add inside the model")
-    
-    P.add_argument("--beta1", type=float, default=.9,
-        help="AdamW beta1")
-    P.add_argument("--beta2", type=float, default=.95,
-        help="AdamW beta2")
     P.add_argument("--wd", type=float, default=.01,
         help="AdamW weight decay")
     
-    P.add_argument("--lr", type=float, default=1e-4,
-        help="Base learning rate")
-    P.add_argument("--lr_z", type=float, default=-1,
-        help="Base learning rate for AdaIN blocks. Set to LR if -1.")
-    P.add_argument("--min_lr", type=float, default=0,
-        help="Minumum learning rate")
-    P.add_argument("--n_ramp", type=int, default=0,
-        help="Number of epochs of linear learning rate warmup")
-    P.add_argument("--scheduler", default="constant",
-        choices=["linear_ramp", "linear_ramp_cosine_decay", "constant"],
-        help="Which scheduler to use")
-    P.add_argument("--headstart_z", type=int, default=0,
-        help="Number of epochs to only train z parameters")
+    P.add_argument("--lrs", default=[0, 1e-5], type=float, nargs="*",
+        help="Learning rates. Even indices give step indices, odd indices give the learning rate to start at the step given at the prior index.")
 
     P.add_argument("--act_type", default="leakyrelu",
         choices=["gelu", "leakyrelu"],
         help="Activation type")
+
+
+
+    P.add_argument("--adain_x_norm", default="none", choices=["none", "norm"],
+        help="Kind of normalization in AdaIN")
+    P.add_argument("--mapping_net_h_dim", default=512, type=int,
+        help="Hidden dimensionality of mapping network")
+    P.add_argument("--mapping_net_layers", default=8, type=int,
+        help="Number of layers in AdaIN mapping network")
+    P.add_argument("--latent_dim", default=512, type=int,
+        help="Latent code dimensionality")
+    P.add_argument("--mapping_net_eqlr", default=1, type=int, choices=[0, 1],
+        help="EquilizedLR in mapping net")
+    P.add_argument("--mapping_net_act", default="leakyrelu", choices=["relu", "leakyrelu"],
+        help="Mapping net activation")
+    P.add_argument("--normalize_z", default=1, type=int, choices=[0, 1],
+        help="Apply PixelNorm to latent codes")
+    P.add_argument("--mapping_net_lrmul", type=float, default=1e-5,
+        help="Multiplier on mapping net learning rates with respect to those in LRS")
+    P.add_argument("--adain_x_mod", default="none", choices=["linear", "none"],
+        help="How features are transformed in AdaIN prior to possibly norm")
     return P
 
 def add_linear_probe_args(P):
@@ -157,8 +164,8 @@ def add_linear_probe_args(P):
         help="Number of classes in probe/finetune data")
     P.add_argument("--probe_n_shot", type=int, default=50,
         help="Number of examples per class in probe/finetune data")
-    P.add_argument("--probe_lr", type=float, default=1e-3,
-        help="Linear probe base learning rate")
+    P.add_argument("--probe_lrs", default=[0, 1e-3], type=float, nargs="*",
+        help="Learning rates. Even indices give step indices, odd indices give the learning rate to start at the step given at the prior index.")
     P.add_argument("--probe_epochs", type=int, default=100,
         help="Linear probe number of epochs")
     P.add_argument("--probe_ignore_z",  type=int, default=1, choices=[0, 1],

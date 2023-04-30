@@ -13,6 +13,7 @@ from original_code.util.misc import get_rank, get_world_size
 
 from Utils import *
 import Misc
+import Utils
 
 def data_path_to_data_name(data_path):
     if "imagenet" in data_path.lower():
@@ -109,7 +110,7 @@ def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None, seed=0,
         classes = set(dataset.classes)
     elif classes is None:
         n_way = len(dataset.classes) if n_way in use_all_list else n_way
-        classes = set(Misc.sample(dataset.classes, k=n_way, seed=seed))
+        classes = set(Utils.sample(dataset.classes, k=n_way, seed=seed))
     else:
         classes = set(classes)
 
@@ -122,7 +123,7 @@ def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None, seed=0,
     if not n_shot in use_all_list:
         n_shot_fn = lambda x: (min(len(x), n_shot) if fewer_shots_if_needed else n_shot)
         try:
-            class2idxs = {c: Misc.sample(idxs, k=n_shot_fn(idxs), seed=seed)
+            class2idxs = {c: Utils.sample(idxs, k=n_shot_fn(idxs), seed=seed)
                 for c,idxs in class2idxs.items()}
         except ValueError as e:
             class2n_idxs = "\n".join([f"\t{c}: {len(idxs)}"
@@ -130,7 +131,7 @@ def get_fewshot_dataset(dataset, n_way=5, n_shot=5, classes=None, seed=0,
             tqdm.write(f"Likely --val_n_shot asked for more examples than are available | val_n_shot {n_shot} | class to num idxs: {class2n_idxs}")
             raise e
   
-    indices = Misc.flatten([idxs for idxs in class2idxs.values()])
+    indices = Utils.flatten([idxs for idxs in class2idxs.values()])
     return ImageFolderSubset(dataset, indices=indices)
 
 class ImageFolderSubset(Dataset):
